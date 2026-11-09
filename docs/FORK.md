@@ -100,3 +100,14 @@ profile 安装的是 `github:TIANXT97/dsh-feishu-plugin#dist`。`dist` 是**只�
 ```
 
 源码仍在 `local` 分支；`dist` 只由脚本生成，不要手工编辑。
+
+### 装新版（重要）
+
+`#dist` 是分支引用，锁文件会记住解析到的 commit，因此普通 `pnpm install` 不会重新拉取：
+
+```bash
+cd ~/.dsh/profiles/web
+pnpm update dsh-feishu-plugin    # 必须用 update，install 会显示 Already up to date
+```
+
+然后重启 dsh-web。
