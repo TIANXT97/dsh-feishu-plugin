@@ -156,6 +156,24 @@ export function createCardKit(client, log) {
       }
     },
 
+    /** Read the current card JSON of a message, so a restart keeps partial output. */
+    async cardContentOf(messageId) {
+      if (!messageId) return undefined;
+      try {
+        const res = await client.im.message.get({
+          path: { message_id: messageId },
+          params: { card_msg_content_type: "user_card_content" },
+        });
+        if (!ok(res)) return undefined;
+        const content = res?.data?.items?.[0]?.body?.content;
+        if (typeof content !== "string" || !content) return undefined;
+        return JSON.parse(content);
+      } catch (error) {
+        log?.debug?.("读取卡片内容失败", { messageId, error: describeLarkError(error) });
+        return undefined;
+      }
+    },
+
     /** Resolve the card entity behind a message, for messages we did not create. */
     async cardIdOfMessage(messageId) {
       try {

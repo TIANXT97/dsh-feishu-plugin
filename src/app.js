@@ -102,10 +102,14 @@ export class FeishuApp {
     this.runs = new RunCards({
       bridge: this.bridge,
       sender: this.sender,
+      cardkit: this.cardkit,
       state: this.state,
       config: this.config,
       log: this.log,
     });
+    await this.runs
+      .reconcileOrphans()
+      .catch((error) => this.log.warn("收尾遗留卡片失败", { error: describeError(error) }));
     this.approvals = new FeishuApprovals({
       ctx: this.ctx,
       bridge: this.bridge,

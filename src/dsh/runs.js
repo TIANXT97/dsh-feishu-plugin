@@ -1,6 +1,13 @@
 /** Turns DSH session events into one live Feishu card per turn. */
 import { describeError, errorMessage, formatDuration, truncate, toolPreview } from "../utils.js";
-import { RUN_ANSWER_ELEMENT_ID, answerPartCard, runCard, splitAnswerForCards } from "../cards.js";
+import {
+  RUN_ANSWER_ELEMENT_ID,
+  answerPartCard,
+  interruptedRunCard,
+  runCard,
+  splitAnswerForCards,
+  stripTransientElements,
+} from "../cards.js";
 import { createCardKit } from "../feishu/cardkit.js";
 import { CardStream } from "./streaming.js";
 
@@ -148,6 +155,14 @@ export class RunCards {
               run.rolloverMessageIds = [...(run.rolloverMessageIds ?? []), message.messageId];
               return { cardId: message.cardId || next.cardId, elementId: RUN_ANSWER_ELEMENT_ID };
             },
+          });
+          this.state.setLiveCard?.(run.sessionId, {
+            messageId: run.messageId,
+            cardId: run.cardId,
+            chatId: run.chatId,
+            threadId: run.threadId,
+            turn: run.turn,
+            startedAt: run.startedAt,
           });
           return run;
         }
@@ -338,6 +353,58 @@ export class RunCards {
       run.streamingEnabled = false;
     }
     await this.patch(run, true);
+    this.state.clearLiveCard?.(run.sessionId);
+  }
+
+  /**
+   * Close cards a previous process left running. A restart kills the turn
+   * before finish(), so without this the card shows "generating" forever.
+   */
+  async reconcileOrphans() {
+    const entries = this.state.takeLiveCards?.() ?? {};
+    const sessionIds = Object.keys(entries);
+    if (sessionIds.length === 0) return;
+    if (!this.cardkit) {
+      this.log.warn("没有卡片实体客户端，跳过遗留卡片收尾", { sessions: sessionIds.length });
+      return;
+    }
+    this.log.info("收尾上次运行遗留的卡片", { sessions: sessionIds.length });
+    for (const sessionId of sessionIds) {
+      const info = entries[sessionId] ?? {};
+      try {
+        // The previous counter is unknown, so jump to the top of int32.
+        const sequence = 2_147_483_646;
+        if (info.cardId) {
+          const closed = await this.cardkit.closeStreaming(info.cardId, sequence, "回合已中断（DSH 重启）");
+          if (!closed.ok) this.log.warn("收尾遗留卡片：关闭流式失败", { sessionId, error: closed.error });
+        }
+        const card = await this.interruptedCard(info);
+        let applied = info.cardId
+          ? await this.cardkit.updateCard(info.cardId, card, sequence + 1)
+          : { ok: false, error: "missing cardId" };
+        if (!applied.ok && info.messageId) applied = await this.sender.patchCard(info.messageId, card);
+        if (!applied.ok) throw new Error(applied.error ?? "card update failed");
+        this.log.info("已收尾遗留卡片", { sessionId, cardId: info.cardId || undefined });
+      } catch (error) {
+        this.log.warn("收尾遗留卡片失败", { sessionId, error: describeError(error) });
+      }
+    }
+  }
+
+  /** Keep whatever partial output the message still carries; never blank a card. */
+  async interruptedCard(info) {
+    const existing = info.messageId ? await this.cardkit.cardContentOf(info.messageId) : undefined;
+    const elements = stripTransientElements(existing?.body?.elements) ?? [];
+    const statusLine = elements.find(
+      (element) => element?.tag === "markdown" && typeof element.content === "string",
+    );
+    if (statusLine) {
+      statusLine.content = statusLine.content.replace(
+        /(^|\n)[^\n]*(?:正在生成回答|正在思考|正在调用)[^\n]*$/u,
+        "$1⚠️ 上一轮因 DSH 重启而中断，以下内容可能不完整",
+      );
+    }
+    return interruptedRunCard(elements);
   }
 
   onSessionEvent(session, event) {

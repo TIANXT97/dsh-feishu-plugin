@@ -955,6 +955,32 @@ export function runCard({ run, maxAnswerChars, streaming = false }) {
   return card({ title, template, elements, streaming });
 }
 
+/** Drop generated element ids and stale buttons before reusing card elements. */
+export function stripTransientElements(value) {
+  if (Array.isArray(value)) return value.map(stripTransientElements).filter((item) => item !== null);
+  if (!value || typeof value !== "object") return value;
+  if (value.tag === "button") return null;
+  const out = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (key === "element_id") continue;
+    out[key] = stripTransientElements(item);
+  }
+  return out;
+}
+
+/** Terminal card for a run that a restart killed before it could finish. */
+export function interruptedRunCard(elements) {
+  const body = Array.isArray(elements) && elements.length > 0
+    ? elements
+    : [
+        md("上一轮回复因 DSH 重启而中断，本卡片未保留内容。"),
+        note("完整过程见 DSH Web 的同一会话。"),
+      ];
+  const built = card({ title: "❌ 回合已中断", template: "grey", elements: body });
+  built.config.summary = { content: "回合已中断（DSH 重启）" };
+  return built;
+}
+
 export function stoppedCard() {
   return card({ title: "⏹ 已请求停止", template: "grey", elements: [md("已向 DSH 发送取消请求。")] });
 }

@@ -181,3 +181,50 @@ test("RunCards streams the answer element and only replaces the card on chrome c
   assert.ok(calls.includes("close"), "stream closed before the terminal card");
   runs.dispose();
 });
+
+test("reconcileOrphans closes a card left running by the previous process", async () => {
+  const { RunCards } = await import("../src/dsh/runs.js");
+  const calls = [];
+  const cardkit = {
+    async closeStreaming(cardId) {
+      calls.push(`close:${cardId}`);
+      return { ok: true };
+    },
+    async updateCard(cardId, card) {
+      calls.push(`update:${cardId}:${card.header.title.content}`);
+      return { ok: true };
+    },
+    async cardContentOf() {
+      return {
+        body: {
+          elements: [
+            { tag: "markdown", element_id: "_1", content: "🤖 处理中\n✍️ 正在生成回答…" },
+            { tag: "button", text: { content: "停止" } },
+          ],
+        },
+      };
+    },
+  };
+  let cleared = false;
+  const runs = new RunCards({
+    bridge: {},
+    sender: {},
+    cardkit,
+    state: {
+      takeLiveCards() {
+        return { s1: { messageId: "m1", cardId: "c1" } };
+      },
+      clearLiveCard() {
+        cleared = true;
+      },
+      setLiveCard() {},
+    },
+    config: { maxAnswerChars: 1_000, streamThrottleMs: 50, stream: true },
+    log: { warn() {}, debug() {}, info() {} },
+  });
+  await runs.reconcileOrphans();
+  runs.dispose();
+  assert.ok(calls.includes("close:c1"), "streaming closed first");
+  assert.ok(calls.some((call) => call.startsWith("update:c1:❌ 回合已中断")), "terminal header written");
+  assert.equal(cleared, false, "clearing happens on a normal finish, not here");
+});

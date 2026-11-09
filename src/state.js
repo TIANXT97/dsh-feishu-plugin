@@ -15,6 +15,7 @@ function emptyState() {
     threads: {},
     roots: {},
     sessionThreads: {},
+    liveCards: {},
   };
 }
 
@@ -45,6 +46,22 @@ function normalize(raw) {
       if (!Array.isArray(value)) continue;
       const threads = value.map((item) => str(item)).filter(Boolean);
       if (threads.length) state.sessionThreads[sessionId] = [...new Set(threads)];
+    }
+  }
+  if (isRecord(raw.liveCards)) {
+    for (const [sessionId, value] of Object.entries(raw.liveCards)) {
+      if (!isRecord(value)) continue;
+      const messageId = str(value.messageId);
+      const cardId = str(value.cardId);
+      if (!messageId && !cardId) continue;
+      state.liveCards[sessionId] = {
+        messageId,
+        cardId,
+        chatId: str(value.chatId),
+        threadId: str(value.threadId),
+        turn: Number(value.turn) || 0,
+        startedAt: Number(value.startedAt) || 0,
+      };
     }
   }
   return state;
@@ -130,6 +147,40 @@ export class StateStore {
       this.state.roots[rootId] = alias ?? sid;
     }
     void this.save();
+  }
+
+  /**
+   * Remember the live run card so a restart can still close it; without this a
+   * card interrupted mid-turn stays on "generating" until Feishu times out.
+   */
+  setLiveCard(sessionId, info) {
+    const sid = str(sessionId);
+    if (!sid) return;
+    this.state.liveCards[sid] = {
+      messageId: str(info?.messageId),
+      cardId: str(info?.cardId),
+      chatId: str(info?.chatId),
+      threadId: str(info?.threadId),
+      turn: Number(info?.turn) || 0,
+      startedAt: Number(info?.startedAt) || Date.now(),
+    };
+    void this.save();
+  }
+
+  clearLiveCard(sessionId) {
+    const sid = str(sessionId);
+    if (!sid || !this.state.liveCards[sid]) return;
+    delete this.state.liveCards[sid];
+    void this.save();
+  }
+
+  /** Take every leftover live card and forget it in one write. */
+  takeLiveCards() {
+    const entries = Object.entries(this.state.liveCards ?? {});
+    if (entries.length === 0) return {};
+    this.state.liveCards = {};
+    void this.save();
+    return Object.fromEntries(entries);
   }
 
   addSessionThread(sessionId, threadId) {
