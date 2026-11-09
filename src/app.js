@@ -13,6 +13,7 @@ import {
   newSessionFormCard,
   openedSessionCard,
   permissionCard,
+  reasoningCard,
   runCard,
   sessionListCard,
   stoppedCard,
@@ -663,6 +664,7 @@ export class FeishuApp {
             `**ID**：\`${shortId(view.sessionId)}\``,
             view.cwd ? `**目录**：\`${view.cwd}\`` : "",
             `**模型**：${view.model ? `${view.model.provider}/${view.model.model}` : "(默认)"}`,
+            `**推理强度**：${view.model?.reasoningEffort ?? "默认"}`,
             `**权限**：${view.perm ?? "(未知)"}`,
             view.running ? "**状态**：⚡ 运行中" : "**状态**：空闲",
           ].filter(Boolean),
@@ -693,6 +695,48 @@ export class FeishuApp {
         return;
       }
       await this.handleModelCommand(sessionId, command.args, message);
+      return;
+    }
+    if (name === "effort" || name === "reasoning" || name === "think") {
+      if (!sessionId) {
+        await this.replyFor(message, errorCard("没有会话", "请在话题里使用 `/effort`。"));
+        return;
+      }
+      this.log.info("收到 /effort 命令", { sessionId, args: command.args });
+      try {
+        if (command.args.trim()) {
+          const next = await this.bridge.switchEffort(sessionId, command.args);
+          this.log.info("/effort 已切换", next);
+          await this.replyFor(
+            message,
+            compactResultCard({
+              title: "🎯 推理强度已切换",
+              template: "green",
+              lines: [
+                `**当前**：${next.reasoningEffort ?? "默认"}（${next.provider}/${next.model}）`,
+                "仅影响后续回复。",
+              ],
+            }),
+          );
+        } else {
+          const view = await this.bridge.viewOf(sessionId);
+          if (!view.model) throw new Error("当前会话还没有选定模型");
+          const catalog = await this.bridge.modelCatalog();
+          await this.replyFor(
+            message,
+            reasoningCard({
+              sid: sessionId,
+              provider: view.model.provider,
+              model: view.model.model,
+              current: view.model,
+              catalog,
+            }),
+          );
+        }
+      } catch (error) {
+        this.log.warn("/effort 失败", { sessionId, args: command.args, error: describeError(error) });
+        await this.replyFor(message, errorCard("切换推理强度失败", describeError(error)));
+      }
       return;
     }
     if (name === "perm" || name === "dir") {
@@ -1106,6 +1150,7 @@ export class FeishuApp {
       current: view.model,
       models: query ? matches : catalog.models,
       page: 0,
+      catalog,
     });
     await this.replyFor(message, card);
   }
@@ -1252,11 +1297,57 @@ export class FeishuApp {
 
     if (kind === "create") return this.createFromForm(action);
 
+    if (kind === "effortopen" || kind === "effortback") {
+      const sid = str(value.s);
+      const view = await this.bridge.viewOf(sid);
+      const catalog = await this.bridge.modelCatalog();
+      if (kind === "effortback" || !view.model) {
+        const back = modelCard({ sid, current: view.model, models: catalog.models, page: 0, catalog });
+        return this.respondCard(action, back, { type: "info", content: "已返回" });
+      }
+      const picker = reasoningCard({
+        sid,
+        provider: view.model.provider,
+        model: view.model.model,
+        current: view.model,
+        catalog,
+      });
+      return this.respondCard(action, picker, { type: "info", content: "已打开推理强度" });
+    }
+
+    if (kind === "effort") {
+      const sid = str(value.s);
+      const provider = str(value.p);
+      const model = str(value.m);
+      const effortRaw = str(value.e);
+      if (!sid || !provider || !model) return { toast: { type: "error", content: "参数不完整" } };
+      const reasoningEffort = !effortRaw || effortRaw === "__default" ? undefined : effortRaw;
+      try {
+        const applied = await this.bridge.applyEffort(sid, provider, model, reasoningEffort);
+        const catalog = await this.bridge.modelCatalog();
+        const picker = reasoningCard({ sid, provider, model, current: applied, catalog });
+        return this.respondCard(action, picker, {
+          type: "success",
+          content: `已切换到 ${reasoningEffort ?? "默认"}`,
+        });
+      } catch (error) {
+        return { toast: { type: "error", content: truncate(describeError(error), 80) } };
+      }
+    }
+
+    if (kind === "noop") return { toast: { type: "info", content: "该模型未声明推理强度档位" } };
+
     if (kind === "modelpage") {
       const sid = str(value.s);
       const view = await this.bridge.viewOf(sid);
       const catalog = await this.bridge.modelCatalog();
-      const card = modelCard({ sid, current: view.model, models: catalog.models, page: Number(value.p) || 0 });
+      const card = modelCard({
+        sid,
+        current: view.model,
+        models: catalog.models,
+        page: Number(value.p) || 0,
+        catalog,
+      });
       return this.respondCard(action, card, { type: "info", content: "已翻页" });
     }
 

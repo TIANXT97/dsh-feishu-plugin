@@ -21,6 +21,9 @@ const KNOWN = new Set([
   "queue",
   "cancel",
   "recover",
+  "effort",
+  "reasoning",
+  "think",
 ]);
 
 export function parseCommand(text) {

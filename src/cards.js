@@ -194,7 +194,7 @@ export function helpCard() {
           "",
           "**话题内**（一条话题 = 一个 DSH 会话）",
           "直接发消息即对话；`/stop` 停止当前回合；`/recover` 清理卡住的运行/提问/审批状态；`/current` 查看会话",
-          "`/model [关键词]` 切换模型；`/perm [档位]` 切换权限预设",
+          "`/model [关键词]` 切换模型；`/effort [档位]` 切换推理强度；`/perm [档位]` 切换权限预设",
           "`/cd <绝对路径>` 迁移工作目录；`/rename <标题>` 重命名",
           "`/steer <文本>` 立即插队；`/queue <文本>` 排队",
           "",
@@ -404,9 +404,78 @@ export function openedSessionCard({ view, style = "resumed", brief }) {
   });
 }
 
-export function modelCard({ sid, current, models, page = 0, pageSize = 8 }) {
+/** Reasoning levels one provider/model advertises, if any. */
+export function reasoningChoicesOf(model, catalog) {
+  const entry = (catalog?.models ?? []).find(
+    (item) => item.provider === model?.provider && item.model === model?.model,
+  );
+  const efforts = Array.isArray(entry?.reasoning?.efforts) ? entry.reasoning.efforts : [];
+  return efforts.length > 0 ? { efforts, defaultEffort: entry.reasoning?.defaultEffort } : undefined;
+}
+
+/** Effort picker for the session's current model. */
+export function reasoningCard({ sid, provider, model, current, catalog }) {
+  const choices = reasoningChoicesOf({ provider, model }, catalog);
+  const elements = [];
+  const lines = [`**${provider}/${model}**`, "选择这一会话的推理强度，点下面任一项即可切换。"];
+  if (current?.provider === provider && current?.model === model && current?.reasoningEffort) {
+    lines.push(`当前：**${current.reasoningEffort}**`);
+  }
+  elements.push(md(lines.join("\n")));
+  if (choices) {
+    const levels = choices.efforts.map((effort) => effort.name || effort.id);
+    if (choices.defaultEffort === undefined) levels.unshift("默认");
+    elements.push(note(`可选：${levels.join(" / ")}`));
+    for (const effort of choices.efforts) {
+      const label = effort.name || effort.id;
+      const selected =
+        current?.provider === provider && current?.model === model && current?.reasoningEffort === effort.id;
+      elements.push(
+        button(`${selected ? "✅ " : "🎯 "}${label}`, selected ? "primary" : "default", {
+          a: "effort",
+          s: sid,
+          p: provider,
+          m: model,
+          e: effort.id,
+        }),
+      );
+    }
+    const defaulting = choices.defaultEffort !== undefined ? choices.defaultEffort : "off";
+    const selectedDefault =
+      current?.provider === provider && current?.model === model && !current?.reasoningEffort;
+    elements.push(
+      button(`${selectedDefault ? "✅ " : "⚖️ "}默认（${defaulting}）`, selectedDefault ? "primary" : "default", {
+        a: "effort",
+        s: sid,
+        p: provider,
+        m: model,
+        e: "__default",
+      }),
+    );
+  } else {
+    elements.push(md("该模型未声明可选的推理强度。"));
+  }
+  elements.push(md("也可以发 `/effort <档位>`，例如 `/effort high`。"));
+  elements.push(button("⬅️ 返回选择模型", "default", { a: "effortback", s: sid }));
+  elements.push(note("切换只影响后续回复。"));
+  return card({ title: "🎯 选择推理强度", template: "turquoise", elements });
+}
+
+export function modelCard({ sid, current, models, page = 0, pageSize = 8, catalog }) {
   const elements = [];
   if (current) elements.push(md(`当前模型：**${current.provider}/${current.model}**`));
+  if (current) {
+    const supportsEffort = Boolean(reasoningChoicesOf(current, catalog));
+    elements.push(
+      button(
+        supportsEffort
+          ? `🎯 切换推理强度${current.reasoningEffort ? `（当前 ${current.reasoningEffort}）` : ""}`
+          : "🎯 当前模型不支持推理强度",
+        supportsEffort ? "primary" : "default",
+        supportsEffort ? { a: "effortopen", s: sid } : { a: "noop", s: sid },
+      ),
+    );
+  }
   const pageCount = Math.max(1, Math.ceil(models.length / pageSize));
   const safePage = Math.min(Math.max(0, page), pageCount - 1);
   const slice = models.slice(safePage * pageSize, safePage * pageSize + pageSize);
@@ -425,7 +494,9 @@ export function modelCard({ sid, current, models, page = 0, pageSize = 8 }) {
   if (safePage + 1 < pageCount) {
     elements.push(button("➡️ 下一页", "default", { a: "modelpage", s: sid, p: safePage + 1 }));
   }
-  elements.push(note("切换只影响后续回复。也可以发 `/model <关键词>`。"));
+  elements.push(
+    note("切换只影响后续回复。也可以发 `/model <关键词>`；点「切换推理强度」或发 `/effort <档位>` 可调推理强度。"),
+  );
   return card({ title: "🧠 选择模型", template: "blue", elements });
 }
 

@@ -91,12 +91,21 @@ export class DshBridge {
       }
       try {
         const stateModel = this.ctx.get?.("sessionProjections")?.stateOf?.(live, "modelSelection");
-        if (stateModel?.next ?? stateModel?.lastUsed) model = stateModel.next ?? stateModel.lastUsed;
+        // stateOf() returns the host state ({ lastUsed, pending }), not the wire view.
+        const liveModel = stateModel?.pending ?? stateModel?.lastUsed;
+        if (liveModel) model = liveModel;
       } catch {
         /* ignore */
       }
       const context = live.requestContext?.();
-      if (context?.provider && context?.model) model = { provider: context.provider, model: context.model };
+      if (context?.provider && context?.model) {
+        const effort = str(model?.reasoningEffort);
+        model = {
+          provider: context.provider,
+          model: context.model,
+          ...(effort ? { reasoningEffort: effort } : {}),
+        };
+      }
       cwd = str(live.header?.cwd ?? cwd);
     }
 
@@ -110,7 +119,11 @@ export class DshBridge {
       agentAvailable: Boolean(summary.agentAvailable),
       perm,
       model: model && model.provider && model.model
-        ? { provider: str(model.provider), model: str(model.model) }
+        ? {
+            provider: str(model.provider),
+            model: str(model.model),
+            ...(str(model.reasoningEffort) ? { reasoningEffort: str(model.reasoningEffort) } : {}),
+          }
         : undefined,
     };
   }
@@ -275,12 +288,25 @@ export class DshBridge {
       const provider = str(group.id);
       const providerName = str(group.name) || provider;
       for (const model of Array.isArray(group.models) ? group.models : []) {
+        const efforts = Array.isArray(model.reasoning?.efforts)
+          ? model.reasoning.efforts.filter((effort) => str(effort?.id))
+          : [];
         models.push({
           provider,
           providerName,
           model: str(model.id),
           name: str(model.name) || str(model.id),
           description: str(model.description) || undefined,
+          reasoning: efforts.length > 0
+            ? {
+                efforts: efforts.map((effort) => ({
+                  id: str(effort.id),
+                  name: str(effort.name) || str(effort.id),
+                  description: str(effort.description) || undefined,
+                })),
+                defaultEffort: str(model.reasoning?.defaultEffort) || undefined,
+              }
+            : undefined,
         });
       }
     }
@@ -290,6 +316,63 @@ export class DshBridge {
         ? { provider: str(catalog.default.provider), model: str(catalog.default.model) }
         : undefined,
       failures: Array.isArray(catalog?.failures) ? catalog.failures : [],
+    };
+  }
+
+  /** Map a human-typed effort token to the adapter's id; "default" clears it. */
+  resolveEffort(provider, model, token) {
+    const wanted = str(token).trim().toLowerCase();
+    if (!wanted) throw new Error("缺少档位，例如 `/effort high`");
+    if (wanted === "default" || wanted === "auto" || wanted === "默认") return undefined;
+    const found = (this.lastCatalog?.models ?? []).find(
+      (item) => item.provider === provider && item.model === model,
+    );
+    const efforts = found?.reasoning?.efforts ?? [];
+    if (efforts.length === 0) return wanted;
+    const byId = efforts.find((effort) => effort.id.toLowerCase() === wanted);
+    if (byId) return byId.id;
+    const byName = efforts.find((effort) => str(effort.name).toLowerCase() === wanted);
+    if (byName) return byName.id;
+    throw new Error(
+      `该模型不支持档位 ${wanted}；可选：${efforts.map((effort) => effort.id).join(" / ")}`,
+    );
+  }
+
+  /** Switch only the Session's reasoning effort, keeping provider/model. */
+  async switchEffort(sessionId, token) {
+    const view = await this.viewOf(sessionId);
+    if (!view.model) throw new Error("当前会话还没有选定模型");
+    this.lastCatalog = await this.modelCatalog();
+    const reasoningEffort = this.resolveEffort(view.model.provider, view.model.model, token);
+    const result = await this.controller().selectModel({
+      sessionId,
+      provider: view.model.provider,
+      model: view.model.model,
+      ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
+    });
+    return {
+      provider: view.model.provider,
+      model: view.model.model,
+      ...(result?.selected?.reasoningEffort === undefined
+        ? {}
+        : { reasoningEffort: str(result.selected.reasoningEffort) }),
+    };
+  }
+
+  /** Apply one explicit effort id (card buttons pass the adapter id directly). */
+  async applyEffort(sessionId, provider, model, reasoningEffort) {
+    const result = await this.controller().selectModel({
+      sessionId,
+      provider,
+      model,
+      ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
+    });
+    return {
+      provider,
+      model,
+      ...(result?.selected?.reasoningEffort === undefined
+        ? {}
+        : { reasoningEffort: str(result.selected.reasoningEffort) }),
     };
   }
 
