@@ -85,3 +85,18 @@ fork 的 `version` 使用后缀区分：`0.5.21-local.1`，每次发布自增，
 流式层原本只存在于压缩产物的补丁里，需要按 `src/dsh/streaming.js` +
 `src/feishu/cardkit.js` 的形式重建为源码；重建时参考 fry-cards 的实现：
 `card.batch_update` 批量 actions、按体积自适应节流、`print_frequency_ms: 15`。
+
+## 发布：dist 分支
+
+profile 安装的是 `github:TIANXT97/dsh-feishu-plugin#dist`。`dist` 是**只含构建产物**的
+孤儿分支（`lib/` + package.json + locale 等，且 **没有 scripts**），因此安装时不需要
+执行 prepare，也就不需要把包名写进 `allowBuilds`（那个键还会 pin 到具体 commit URL，
+每次推送都会变）。
+
+发布一条命令：
+
+```bash
+./scripts/publish-dist.sh     # 构建 → 组装 → 强制推送 dist
+```
+
+源码仍在 `local` 分支；`dist` 只由脚本生成，不要手工编辑。
