@@ -33,6 +33,7 @@ import { FeishuApprovals } from "./dsh/approvals.js";
 import { FeishuQuestions } from "./dsh/questions.js";
 import { createFeishuClient, startGateway } from "./feishu/gateway.js";
 import { createSender } from "./feishu/sender.js";
+import { createCardKit } from "./feishu/cardkit.js";
 import { Dedup, createSigner, newRequestId } from "./security.js";
 import { StateStore } from "./state.js";
 import {
@@ -96,6 +97,7 @@ export class FeishuApp {
     await this.state.load();
     const client = createFeishuClient(this.config);
     this.sender = createSender(client, this.log);
+    this.cardkit = createCardKit(client, this.log);
     this.bridge = new DshBridge(this.ctx, this.config, this.log);
     this.runs = new RunCards({
       bridge: this.bridge,
@@ -203,6 +205,8 @@ export class FeishuApp {
       this.gateway?.stop();
       const client = createFeishuClient(next);
       this.sender = createSender(client, this.log);
+      this.cardkit = createCardKit(client, this.log);
+      this.runs.cardkit = this.cardkit;
       this.runs.sender = this.sender;
       this.approvals.sender = this.sender;
       this.questions.sender = this.sender;

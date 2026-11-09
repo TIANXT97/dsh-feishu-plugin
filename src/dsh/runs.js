@@ -1,6 +1,8 @@
 /** Turns DSH session events into one live Feishu card per turn. */
 import { describeError, errorMessage, formatDuration, truncate, toolPreview } from "../utils.js";
-import { answerPartCard, runCard, splitAnswerForCards } from "../cards.js";
+import { RUN_ANSWER_ELEMENT_ID, answerPartCard, runCard, splitAnswerForCards } from "../cards.js";
+import { createCardKit } from "../feishu/cardkit.js";
+import { CardStream } from "./streaming.js";
 
 function textOfMessage(message) {
   const blocks = Array.isArray(message?.content) ? message.content : [];
@@ -10,10 +12,31 @@ function textOfMessage(message) {
     .join("");
 }
 
+/** Answer text carried by the fixed answer element of a built card. */
+function answerTextOf(card) {
+  for (const element of card?.body?.elements ?? []) {
+    if (element?.element_id === RUN_ANSWER_ELEMENT_ID) return String(element.content ?? "");
+  }
+  return "";
+}
+
+/** Everything on the card except the streamed answer and the elapsed counter. */
+function chromeFingerprint(run) {
+  return [
+    run.status,
+    run.canStop ? "s" : "-",
+    `${(run.reasoningSteps ?? []).length}:${String(run.streamingReasoning ?? "").slice(-90)}`,
+    run.error ?? "",
+    run.toolTotal ?? 0,
+    (run.tools ?? []).map((tool) => `${tool.callId}:${tool.status}`).join(","),
+  ].join("|");
+}
+
 export class RunCards {
-  constructor({ bridge, sender, state, config, log }) {
+  constructor({ bridge, sender, cardkit, state, config, log }) {
     this.bridge = bridge;
     this.sender = sender;
+    this.cardkit = cardkit;
     this.state = state;
     this.config = config;
     this.log = log;
@@ -58,6 +81,8 @@ export class RunCards {
       finishedAt: 0,
       tools: [],
       toolTotal: 0,
+      reasoningSteps: [],
+      sequence: 0,
       text: "",
       streamingText: "",
       streamingReasoning: "",
@@ -73,13 +98,70 @@ export class RunCards {
       finished: false,
     };
     this.runs.set(sessionId, run);
-    const card = runCard({ run, maxAnswerChars: this.config.maxAnswerChars });
+    await this.openCard(run, anchorMessageId, chatId);
+    this.schedule(run, true);
+    return run;
+  }
+
+  /**
+   * Send the run card. With a card entity available the answer element streams
+   * (typewriter); otherwise the card is patched as a whole, as upstream does.
+   */
+  async openCard(run, anchorMessageId, chatId) {
+    const canStream = this.config.stream !== false && Boolean(this.cardkit);
+    if (canStream) {
+      const card = runCard({ run, maxAnswerChars: this.config.maxAnswerChars, streaming: true });
+      const created = await this.cardkit.createCard(card);
+      if (created.ok) {
+        const sent = await this.cardkit.sendByReference({
+          chatId,
+          replyToMessageId: anchorMessageId,
+          cardId: created.cardId,
+          replyInThread: Boolean(run.threadId),
+        });
+        if (sent.ok) {
+          run.messageId = sent.messageId;
+          run.cardId = sent.cardId || created.cardId;
+          run.streamingEnabled = true;
+          run.sequence = 0;
+          run.stream = new CardStream({
+            cardkit: this.cardkit,
+            log: this.log,
+            cardId: run.cardId,
+            elementId: RUN_ANSWER_ELEMENT_ID,
+            baseThrottleMs: this.config.streamThrottleMs,
+            maxChars: 30_000,
+            onRollover: async () => {
+              const fresh = runCard({
+                run: { ...run, text: "", streamingText: "" },
+                maxAnswerChars: this.config.maxAnswerChars,
+                streaming: true,
+              });
+              const next = await this.cardkit.createCard(fresh);
+              if (!next.ok) return undefined;
+              const message = await this.cardkit.sendByReference({
+                chatId: run.chatId,
+                cardId: next.cardId,
+                replyInThread: Boolean(run.threadId),
+              });
+              if (!message.ok) return undefined;
+              run.rolloverMessageIds = [...(run.rolloverMessageIds ?? []), message.messageId];
+              return { cardId: message.cardId || next.cardId, elementId: RUN_ANSWER_ELEMENT_ID };
+            },
+          });
+          return run;
+        }
+        run.error = sent.error ?? "无法发送运行卡片";
+        return run;
+      }
+      this.log.warn("创建卡片实体失败，回退整卡更新", { sessionId: run.sessionId, error: created.error });
+    }
+    const plain = runCard({ run, maxAnswerChars: this.config.maxAnswerChars });
     const sent = anchorMessageId
-      ? await this.sender.replyCard(anchorMessageId, card)
-      : await this.sender.sendCard(chatId, card);
+      ? await this.sender.replyCard(anchorMessageId, plain)
+      : await this.sender.sendCard(chatId, plain);
     if (sent.ok) run.messageId = sent.messageId;
     else run.error = sent.error ?? "无法发送运行卡片";
-    this.schedule(run, true);
     return run;
   }
 
@@ -117,6 +199,8 @@ export class RunCards {
       finishedAt: 0,
       tools: [],
       toolTotal: 0,
+      reasoningSteps: [],
+      sequence: 0,
       text: "",
       streamingText: "",
       streamingReasoning: "",
@@ -133,15 +217,7 @@ export class RunCards {
       continued: true,
     };
     this.runs.set(sessionId, run);
-    const card = runCard({ run, maxAnswerChars: this.config.maxAnswerChars });
-    let sent = anchorMessageId
-      ? await this.sender.replyCard(anchorMessageId, card)
-      : { ok: false, error: "missing anchor" };
-    if (!sent.ok && (chatId || run.chatId)) {
-      sent = await this.sender.sendCard(chatId || run.chatId, card);
-    }
-    if (sent.ok) run.messageId = sent.messageId;
-    else run.error = sent.error ?? "无法发送继续处理卡片";
+    await this.openCard(run, anchorMessageId, chatId || run.chatId);
     this.schedule(run, true);
     return run;
   }
@@ -167,9 +243,34 @@ export class RunCards {
     run.patchQueued = true;
     run.patchChain = (run.patchChain ?? Promise.resolve())
       .then(async () => {
-        const card = runCard({ run, maxAnswerChars: this.config.maxAnswerChars });
-        const result = await this.sender.patchCard(run.messageId, card);
-        if (!result.ok) this.log.debug("运行卡片更新失败", { sessionId: run.sessionId, error: result.error });
+        const card = runCard({
+          run,
+          maxAnswerChars: this.config.maxAnswerChars,
+          streaming: run.streamingEnabled === true && !run.finished,
+        });
+        const answerText = answerTextOf(card);
+        const chrome = chromeFingerprint(run);
+        // Only the answer moved: let the typewriter carry it and skip a full
+        // card replace, which would also re-render every other element.
+        if (run.stream && !run.stream.failed && !force && chrome === run.lastChrome) {
+          run.stream.push(answerText);
+          run.lastAnswer = answerText;
+          return;
+        }
+        const result =
+          run.cardId && this.cardkit
+            ? await this.cardkit.updateCard(
+                run.cardId,
+                card,
+                (run.sequence = ((run.sequence ?? 0) % 2_147_483_647) + 1),
+              )
+            : await this.sender.patchCard(run.messageId, card);
+        if (result.ok) {
+          run.lastChrome = chrome;
+          run.lastAnswer = answerText;
+        } else {
+          this.log.debug("运行卡片更新失败", { sessionId: run.sessionId, error: result.error });
+        }
       })
       .catch((error) => {
         this.log.warn("运行卡片更新异常", { sessionId: run.sessionId, error: describeError(error) });
@@ -211,7 +312,7 @@ export class RunCards {
         }
       }
     }
-    void this.patch(run, true).then(() => {
+    void this.finalize(run).then(() => {
       if (splitParts.length > 0) void this.sendParts(run);
     });
     this.log.info("回合结束", {
@@ -221,6 +322,22 @@ export class RunCards {
       tools: run.tools.length,
       error,
     });
+  }
+
+  /** Close the typewriter, then write the terminal card exactly once. */
+  async finalize(run) {
+    if (run.stream) {
+      const summary = String(run.text || run.streamingText || "").replace(/\s+/g, " ").trim();
+      const preview = summary ? (summary.length > 60 ? `${summary.slice(0, 59)}…` : summary) : "完成";
+      try {
+        await run.stream.drain();
+        await run.stream.close(preview);
+      } catch (error) {
+        this.log.debug("关闭流式卡片失败", { sessionId: run.sessionId, error: describeError(error) });
+      }
+      run.streamingEnabled = false;
+    }
+    await this.patch(run, true);
   }
 
   onSessionEvent(session, event) {
@@ -245,6 +362,7 @@ export class RunCards {
         run.tools.push({
           callId: String(data.callId ?? ""),
           name: String(data.name ?? "tool"),
+          step: run.step,
           preview: toolPreview(String(data.name ?? ""), data.arguments),
           status: "running",
         });
@@ -294,6 +412,11 @@ export class RunCards {
     const frame = payload?.frame;
     if (!frame) return;
     if (frame.type === "start") {
+      const finishedStep = String(run.streamingReasoning ?? "").trim();
+      if (finishedStep) {
+        run.reasoningSteps = [...(run.reasoningSteps ?? []), { step: run.step, text: finishedStep }].slice(-12);
+        run.streamingReasoning = "";
+      }
       run.status = "running";
       run.canStop = true;
       run.turn = Number(frame.turn) || run.turn;
@@ -318,7 +441,8 @@ export class RunCards {
     } else if (chunk.type === "reasoning-delta" && chunk.text) {
       // Keep the chain for the collapsed panel, but do not re-render the card
       // on every token. One status update per second keeps the height stable.
-      run.streamingReasoning = truncate(`${run.streamingReasoning}${chunk.text}`, 4_000);
+      const merged = `${run.streamingReasoning}${chunk.text}`;
+      run.streamingReasoning = merged.length > 4_000 ? `…${merged.slice(merged.length - 3_999)}` : merged;
       this.schedule(run, false, 1_000);
     }
   }

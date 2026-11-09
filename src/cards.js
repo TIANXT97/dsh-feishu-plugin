@@ -122,10 +122,22 @@ function fitCard(value) {
   return value;
 }
 
-function card({ title, template = "blue", elements = [] }) {
+function card({ title, template = "blue", elements = [], streaming = false }) {
+  const config = { update_multi: true };
+  if (streaming) {
+    // Declaring the streaming config in the card JSON lets Feishu animate as
+    // soon as the card exists; 15ms print frequency is the fry-cards default.
+    config.streaming_mode = true;
+    config.summary = { content: "[Generating...]" };
+    config.streaming_config = {
+      print_frequency_ms: { default: 15 },
+      print_step: { default: 1 },
+      print_strategy: "fast",
+    };
+  }
   return fitCard(limitCardTables({
     schema: "2.0",
-    config: { update_multi: true },
+    config,
     header: { title: { tag: "plain_text", content: truncate(title, 80) }, template },
     body: { elements: elements.slice(0, 190) },
   }));
@@ -782,7 +794,17 @@ function toolLine(tool) {
   return `- ${toolHeader(tool)}`;
 }
 
-export function runCard({ run, maxAnswerChars }) {
+/** Keep the newest characters: streamed reasoning must not freeze on its head. */
+function tailTruncate(text, max) {
+  const value = String(text ?? "");
+  if (value.length <= max) return value;
+  return `…${value.slice(value.length - Math.max(0, max - 1))}`;
+}
+
+/** Fixed answer element: the typewriter pushes only this element. */
+export const RUN_ANSWER_ELEMENT_ID = "run_answer";
+
+export function runCard({ run, maxAnswerChars, streaming = false }) {
   const status = run.status;
   const title =
     status === "continued"
@@ -799,28 +821,39 @@ export function runCard({ run, maxAnswerChars }) {
                 : "⏳ 正在开始"
               : "🤖 处理中";
   const template =
-    status === "done" ? "green" : status === "error" ? "red" : status === "stopped" || status === "continued" ? "grey" : "blue";
+    status === "done"
+      ? "green"
+      : status === "error"
+        ? "red"
+        : status === "stopped" || status === "continued"
+          ? "grey"
+          : "blue";
 
   const finished = status === "done" || status === "error" || status === "stopped" || status === "continued";
   const answer =
     status === "continued" || run.answerHidden
       ? ""
-      : String(
-          (finished ? run.text || run.streamingText : run.streamingText || run.text) || "",
-        ).trim();
-  const reasoning = (run.streamingReasoning || "").trim();
+      : String((finished ? run.text || run.streamingText : run.streamingText || run.text) || "").trim();
   const elapsed = run.startedAt ? Date.now() - run.startedAt : 0;
+  const active = status === "starting" || status === "running";
+  const tools = run.tools ?? [];
+  const totalTools = run.toolTotal ?? tools.length;
 
-  const meta = [];
-  if (run.model) meta.push(`🧠 ${run.model}`);
-  if (run.perm) meta.push(`🔐 ${run.perm}`);
-  meta.push(`⏱ ${formatDuration(elapsed)}`);
-  if (run.turn) meta.push(`第 ${run.turn} 轮`);
-  if (run.error) meta.push(`⚠️ ${truncate(run.error, 1_000)}`);
+  // Thinking is kept per step so one turn shows every reasoning round.
+  const rawSteps = [...(run.reasoningSteps ?? [])];
+  if (String(run.streamingReasoning ?? "").trim()) {
+    rawSteps.push({ step: run.step || rawSteps.length + 1, text: String(run.streamingReasoning).trim() });
+  }
+  const stepList = [];
+  for (const item of rawSteps) {
+    const last = stepList[stepList.length - 1];
+    if (last && last.step === item.step) last.text = `${last.text}\n${item.text}`;
+    else stepList.push({ step: item.step, text: item.text });
+  }
+  const reasoningChars = stepList.reduce((total, item) => total + item.text.length, 0);
 
-  // Fixed skeleton: status / thinking / tools / answer / stop. Sections never
-  // swap places, so streaming does not collapse the card height.
-  const runningTool = [...(run.tools ?? [])].reverse().find((tool) => tool.status === "running");
+  const runningTool = [...tools].reverse().find((tool) => tool.status === "running");
+  const reasoningTail = String(run.streamingReasoning ?? "").replace(/\s+/g, " ").trim().slice(-90);
   const statusLine =
     status === "continued"
       ? "✅ 回答已提交，后续输出见下方新卡片"
@@ -836,59 +869,90 @@ export function runCard({ run, maxAnswerChars }) {
                 ? `🔧 正在调用 ${truncate(runningTool.name, 30)}…`
                 : run.continued
                   ? "💭 继续处理…"
-                  : "💭 正在思考…";
+                  : reasoningTail
+                    ? `💭 思考中：${reasoningTail}`
+                    : "💭 正在思考…";
 
   const elements = [];
-  elements.push(md(`${meta.join(" · ")}\n${statusLine}`));
+  elements.push(md(statusLine));
 
-  const active = status === "starting" || status === "running";
-  const tools = run.tools ?? [];
-  const totalTools = run.toolTotal ?? tools.length;
-  const thinkingTitle = active
-    ? "💭 思考过程（思考中…）"
-    : reasoning
-      ? "💭 思考过程"
-      : "💭 思考过程（暂无）";
-  elements.push(
-    collapsiblePanel({
-      title: thinkingTitle,
-      expanded: false,
-      border: "grey",
-      body: reasoning ? truncate(reasoning, 1_500) : "_暂无思考内容_",
-    }),
-  );
+  // The answer element exists from the first render: element content can only
+  // be updated on an element that is already on the card.
+  elements.push({
+    tag: "markdown",
+    element_id: RUN_ANSWER_ELEMENT_ID,
+    content: answer ? truncate(answer, maxAnswerChars) : "",
+  });
+  if (answer.length > maxAnswerChars) {
+    elements.push(note("回答过长，卡片已截断；完整内容可在 DSH Web 会话里查看。"));
+  }
 
-  const toolTitle = totalTools
-    ? `🔧 ${totalTools} 次工具调用${active ? "（进行中）" : ""}`
-    : "🔧 工具调用（暂无）";
-  const toolBody = tools.length
-    ? [
-        ...tools.map((tool) => toolLine(tool)),
-        ...(totalTools > tools.length ? [`- …已省略前 ${totalTools - tools.length} 次`] : []),
-      ].join("\n")
-    : "_暂无工具调用_";
-  elements.push(
-    collapsiblePanel({
-      title: toolTitle,
-      expanded: false,
-      border: "blue",
-      body: toolBody,
-    }),
-  );
-
-  if (answer) {
-    elements.push(hr());
-    elements.push(md(truncate(answer, maxAnswerChars)));
-    if (answer.length > maxAnswerChars) {
-      elements.push(note("回答过长，卡片已截断；完整内容可在 DSH Web 会话里查看。"));
+  // Unified bottom panel: thinking and tools interleaved by step.
+  const byStep = new Map();
+  const bucketOf = (step) => {
+    const key = Number(step) || 0;
+    if (!byStep.has(key)) byStep.set(key, { reasoning: "", tools: [] });
+    return byStep.get(key);
+  };
+  for (const item of stepList) {
+    const bucket = bucketOf(item.step);
+    bucket.reasoning = bucket.reasoning ? `${bucket.reasoning}\n${item.text}` : item.text;
+  }
+  for (const tool of tools) bucketOf(tool.step ?? run.step).tools.push(tool);
+  const sections = [];
+  for (const [step, bucket] of [...byStep.entries()].sort((left, right) => left[0] - right[0])) {
+    const reasoningText = bucket.reasoning.trim();
+    if (reasoningText) sections.push(`**💭 第 ${step} 步**\n${tailTruncate(reasoningText, 800)}`);
+    if (bucket.tools.length) {
+      sections.push(`**🔧 工具（第 ${step} 步）**\n${bucket.tools.map((tool) => toolLine(tool)).join("\n")}`);
     }
   }
+  if (totalTools > tools.length) sections.push(`- …已省略前 ${totalTools - tools.length} 次工具调用`);
+  const PANEL_BUDGET = 2_800;
+  const picked = [];
+  let usedChars = 0;
+  for (let index = sections.length - 1; index >= 0; index -= 1) {
+    const sectionText = sections[index];
+    if (picked.length > 0 && usedChars + sectionText.length > PANEL_BUDGET) break;
+    picked.unshift(sectionText);
+    usedChars += sectionText.length;
+  }
+  const omittedSections = sections.length - picked.length;
+  let panelBody = picked.join("\n\n");
+  if (omittedSections > 0) panelBody = `_…前 ${omittedSections} 段已省略_\n\n${panelBody}`;
+  if (!panelBody) panelBody = active ? "_正在思考…_" : "_本回合没有思考或工具调用_";
+  const panelBorder =
+    status === "done" ? "green" : status === "error" ? "red" : status === "stopped" ? "yellow" : "grey";
+  const showPanel = active || stepList.length > 0 || totalTools > 0 || Boolean(run.error);
+  if (showPanel) {
+    const panelParts = [];
+    if (run.model) panelParts.push(`🍟 ${run.model}`);
+    panelParts.push(`💭${stepList.length}`);
+    panelParts.push(`🔧${totalTools}`);
+    panelParts.push(`⏱ ${formatDuration(elapsed)}`);
+    if (active) panelParts.push("进行中");
+    elements.push(
+      collapsiblePanel({
+        title: panelParts.join(" · "),
+        expanded: false,
+        border: panelBorder,
+        body: panelBody,
+      }),
+    );
+  }
+
+  const footerParts = [];
+  if (run.perm) footerParts.push(`🔐 ${run.perm}`);
+  if (answer.length > 0) footerParts.push(`✍️ ${answer.length} 字`);
+  if (run.turn) footerParts.push(`第 ${run.turn} 轮`);
+  if (run.error) footerParts.push(`⚠️ ${truncate(run.error, 200)}`);
+  if (footerParts.length) elements.push(note(footerParts.join(" · ")));
 
   if (run.answerNote) elements.push(note(run.answerNote));
   if (run.canStop) {
     elements.push(button("⏹ 强制停止", "danger", { a: "stop", s: run.sessionId }));
   }
-  return card({ title, template, elements });
+  return card({ title, template, elements, streaming });
 }
 
 export function stoppedCard() {

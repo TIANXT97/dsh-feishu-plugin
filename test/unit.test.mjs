@@ -178,48 +178,58 @@ test("sessionBrief extracts title, summary, last user and assistant text", async
   assert.equal(brief.lastAssistant, "latest answer");
 });
 
-test("runCard folds every tool into one drawer and shows the total count", () => {
-  const tools = Array.from({ length: 5 }, (_, index) => ({
-    callId: `c${index}`,
-    name: "bash",
-    preview: `echo ${index}`,
-    status: "done",
-  }));
-  const live = runCard({
-    run: { sessionId: "s", status: "running", startedAt: Date.now(), tools, toolTotal: 5, streamingText: "" },
-    maxAnswerChars: 4_000,
-  });
-  const json = JSON.stringify(live);
-  assert.match(json, /collapsible_panel/);
-  assert.match(json, /5 次工具调用（进行中）/);
-  assert.match(json, /✅ \*\*bash\*\* — echo 4/);
-  const done = runCard({
-    run: { sessionId: "s", status: "done", startedAt: Date.now(), tools, toolTotal: 5, text: "ok" },
-    maxAnswerChars: 4_000,
-  });
-  assert.match(JSON.stringify(done), /5 次工具调用/);
-  assert.match(JSON.stringify(done), /✅ \*\*bash\*\* — echo 4/);
-});
-
-test("runCard always reserves thinking and tool drawers, even when empty", () => {
-  const card = runCard({
-    run: { sessionId: "s", status: "running", startedAt: Date.now(), tools: [], toolTotal: 0, streamingText: "" },
-    maxAnswerChars: 4_000,
-  });
-  const json = JSON.stringify(card);
-  assert.match(json, /思考过程（思考中…）/);
-  assert.match(json, /工具调用（暂无）/);
-  assert.match(json, /暂无思考内容/);
-  assert.match(json, /暂无工具调用/);
-});
-
-test("runCard keeps a fixed skeleton with a collapsed thinking panel", () => {
+test("runCard keeps one unified process panel and counts thinking and tools", () => {
+  const tools = [
+    { callId: "c0", name: "bash", preview: "echo 0", status: "done", step: 1 },
+    { callId: "c1", name: "read", preview: "a.ts", status: "running", step: 2 },
+  ];
   const card = runCard({
     run: {
       sessionId: "s",
       status: "running",
       startedAt: Date.now(),
-      tools: [{ callId: "c1", name: "bash", preview: "ls", status: "running" }],
+      tools,
+      toolTotal: 2,
+      reasoningSteps: [{ step: 1, text: "先看目录。" }],
+      streamingReasoning: "再决定怎么改。",
+      step: 2,
+      streamingText: "正文",
+      canStop: true,
+    },
+    maxAnswerChars: 4_000,
+  });
+  const panels = card.body.elements.filter((element) => element.tag === "collapsible_panel");
+  assert.equal(panels.length, 1, "one unified panel instead of separate drawers");
+  const panelTitle = panels[0].header.title.content;
+  assert.match(panelTitle, /💭2/);
+  assert.match(panelTitle, /🔧2/);
+  assert.match(panelTitle, /⏱/);
+  const body = panels[0].elements[0].content;
+  assert.match(body, /💭 第 1 步/);
+  assert.match(body, /🔧 工具（第 1 步）/);
+  assert.match(body, /💭 第 2 步/);
+  assert.match(body, /✅ \*\*bash\*\* — echo 0/);
+  assert.match(body, /🔧 \*\*read\*\* — a\.ts/);
+});
+
+test("runCard hides the process panel for a finished reply with nothing to show", () => {
+  const card = runCard({
+    run: { sessionId: "s", status: "done", startedAt: Date.now(), tools: [], toolTotal: 0, text: "好的。" },
+    maxAnswerChars: 4_000,
+  });
+  const panels = card.body.elements.filter((element) => element.tag === "collapsible_panel");
+  assert.equal(panels.length, 0, "a short finished answer stays clean");
+  const answer = card.body.elements.find((element) => element.element_id === "run_answer");
+  assert.equal(answer.content, "好的。");
+});
+
+test("runCard keeps a fixed answer element and a collapsed process panel while running", () => {
+  const card = runCard({
+    run: {
+      sessionId: "s",
+      status: "running",
+      startedAt: Date.now(),
+      tools: [{ callId: "c1", name: "bash", preview: "ls", status: "running", step: 1 }],
       toolTotal: 1,
       streamingReasoning: "先看看目录，再决定怎么改。",
       streamingText: "",
@@ -227,10 +237,13 @@ test("runCard keeps a fixed skeleton with a collapsed thinking panel", () => {
     },
     maxAnswerChars: 4_000,
   });
+  const answer = card.body.elements.find((element) => element.element_id === "run_answer");
+  assert.ok(answer, "answer element exists from the first render");
+  assert.equal(answer.content, "");
+  const panel = card.body.elements.find((element) => element.tag === "collapsible_panel");
+  assert.equal(panel.expanded, false);
   const json = JSON.stringify(card);
-  assert.match(json, /思考过程/);
-  assert.match(json, /正在(思考|调用)/);
-  assert.match(json, /collapsible_panel/);
+  assert.match(json, /正在调用 bash/);
   assert.match(json, /强制停止/);
 });
 

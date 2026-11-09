@@ -116,6 +116,25 @@ export function createCardKit(client, log) {
       }
     },
 
+    /** Replace the whole card JSON of an existing entity (chrome updates). */
+    async updateCard(cardId, card, sequence) {
+      if (!cardId) return { ok: false, error: "missing cardId" };
+      try {
+        const res = await client.cardkit.v1.card.update({
+          path: { card_id: cardId },
+          data: {
+            card: { type: "card_json", data: JSON.stringify(card) },
+            sequence: Math.min(sequence, MAX_SEQUENCE),
+            uuid: `u_${cardId}_${sequence}`,
+          },
+        });
+        if (!ok(res)) return { ok: false, error: `code=${res.code} msg=${res.msg ?? ""}` };
+        return { ok: true };
+      } catch (error) {
+        return fail(error);
+      }
+    },
+
     /** Leave streaming mode and refresh the chat-list preview. */
     async closeStreaming(cardId, sequence, summary) {
       if (!cardId) return { ok: false, error: "missing cardId" };

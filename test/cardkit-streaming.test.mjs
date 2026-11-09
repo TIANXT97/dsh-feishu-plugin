@@ -117,3 +117,67 @@ test("CardStream rolls over to a new card past maxChars", async () => {
   assert.equal(stream.cardId, "card_next_1");
   assert.equal(client.calls.some((call) => call.tag === "card.settings"), true);
 });
+
+test("RunCards streams the answer element and only replaces the card on chrome changes", async () => {
+  const { RunCards } = await import("../src/dsh/runs.js");
+  const calls = [];
+  const cardkit = {
+    async createCard() {
+      calls.push("create");
+      return { ok: true, cardId: "card_1" };
+    },
+    async sendByReference() {
+      calls.push("send");
+      return { ok: true, messageId: "msg_1", cardId: "card_1" };
+    },
+    async updateElement(_cardId, _elementId, content) {
+      calls.push(`element:${content}`);
+      return { ok: true };
+    },
+    async updateCard() {
+      calls.push("card");
+      return { ok: true };
+    },
+    async closeStreaming() {
+      calls.push("close");
+      return { ok: true };
+    },
+  };
+  const runs = new RunCards({
+    bridge: {},
+    sender: {},
+    cardkit,
+    state: {},
+    config: { maxAnswerChars: 12_000, streamThrottleMs: 50, stream: true },
+    log: { warn() {}, debug() {}, info() {} },
+  });
+  const run = {
+    sessionId: "s1",
+    chatId: "chat",
+    tools: [],
+    toolTotal: 0,
+    reasoningSteps: [],
+    status: "starting",
+    startedAt: Date.now(),
+    streamingText: "",
+    streamingReasoning: "",
+    text: "",
+  };
+  await runs.openCard(run, undefined, "chat");
+  assert.equal(run.cardId, "card_1");
+  assert.ok(run.stream, "typewriter controller attached");
+
+  run.status = "running";
+  run.streamingText = "第一段";
+  await runs.patch(run, true);
+  assert.equal(calls.at(-1), "card", "first patch writes the whole card");
+
+  run.streamingText = "第一段和第二段";
+  await runs.patch(run, false);
+  await new Promise((resolve) => setTimeout(resolve, 120));
+  assert.ok(calls.some((call) => call === "element:第一段和第二段"), "answer flows through the element path");
+
+  await runs.finalize(run);
+  assert.ok(calls.includes("close"), "stream closed before the terminal card");
+  runs.dispose();
+});
