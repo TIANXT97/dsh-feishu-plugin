@@ -762,21 +762,23 @@ export function questionAnsweredCard({ summary }) {
   });
 }
 
-function panelHeader(titleMd) {
+function panelHeader(titleMd, iconPosition = "follow_text") {
+  const icon = { tag: "standard_icon", token: "down-small-ccm_outlined", size: "16px 16px" };
+  if (iconPosition === "right") icon.color = "grey";
   return {
     title: { tag: "markdown", content: titleMd },
     vertical_align: "center",
-    icon: { tag: "standard_icon", token: "down-small-ccm_outlined", size: "16px 16px" },
-    icon_position: "follow_text",
+    icon,
+    icon_position: iconPosition,
     icon_expanded_angle: -180,
   };
 }
 
-function collapsiblePanel({ title, expanded, border = "grey", body }) {
+function collapsiblePanel({ title, expanded, border = "grey", body, iconPosition = "follow_text" }) {
   return {
     tag: "collapsible_panel",
     expanded,
-    header: panelHeader(title),
+    header: panelHeader(title, iconPosition),
     border: { color: border, corner_radius: "5px" },
     vertical_spacing: "8px",
     padding: "8px 8px 8px 8px",
@@ -792,6 +794,21 @@ function toolHeader(tool) {
 
 function toolLine(tool) {
   return `- ${toolHeader(tool)}`;
+}
+
+/** 2706 → 2.7k, 454723 → 454.7k, 1000000 → 1.0m (fry footer style). */
+function compactCount(value) {
+  const n = Number(value) || 0;
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}m`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
+  return String(n);
+}
+
+/** router-box-01/River-Deepseek-flash → River-Deepseek-flash. */
+function shortModelName(model) {
+  const value = String(model ?? "");
+  const tail = value.split("/").pop();
+  return truncate(tail || value, 28);
 }
 
 /** Keep the newest characters: streamed reasoning must not freeze on its head. */
@@ -874,7 +891,7 @@ export function runCard({ run, maxAnswerChars, streaming = false }) {
                     : "💭 正在思考…";
 
   const elements = [];
-  elements.push(md(statusLine));
+  if (!finished) elements.push(md(statusLine));
 
   // The answer element exists from the first render: element content can only
   // be updated on an element that is already on the card.
@@ -926,17 +943,25 @@ export function runCard({ run, maxAnswerChars, streaming = false }) {
   const showPanel = active || stepList.length > 0 || totalTools > 0 || Boolean(run.error);
   if (showPanel) {
     const panelParts = [];
-    if (run.model) panelParts.push(`🍟 ${run.model}`);
-    panelParts.push(`💭${stepList.length}`);
+    if (run.model) panelParts.push(`🍟 ${shortModelName(run.model)}`);
+    panelParts.push(`💬${stepList.length}`);
     panelParts.push(`🔧${totalTools}`);
-    panelParts.push(`⏱ ${formatDuration(elapsed)}`);
-    if (active) panelParts.push("进行中");
+    const contextUsed =
+      (Number(run.usage?.inputTokens) || 0) + (Number(run.usage?.cacheReadTokens) || 0);
+    const contextMax = Number(run.contextWindow) || 0;
+    if (contextUsed > 0 && contextMax > 0) {
+      const pct = Math.max(1, Math.round((contextUsed / contextMax) * 100));
+      panelParts.push(`${compactCount(contextUsed)}/${compactCount(contextMax)} (${pct}%)`);
+    }
+    if (Number(run.usage?.outputTokens) > 0) panelParts.push(`🧮 ${compactCount(run.usage.outputTokens)}`);
+    panelParts.push(`🕐 ${formatDuration(elapsed)}`);
     elements.push(
       collapsiblePanel({
         title: panelParts.join(" · "),
         expanded: false,
         border: panelBorder,
         body: panelBody,
+        iconPosition: "right",
       }),
     );
   }

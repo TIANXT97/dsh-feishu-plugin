@@ -376,6 +376,17 @@ export class DshBridge {
     };
   }
 
+  /** Context window of the model the session last routed to, for the footer. */
+  contextWindowOf(sessionId) {
+    try {
+      const live = this.sessionStore?.()?.get?.(sessionId);
+      const context = live?.requestContext?.();
+      return Number(context?.contextWindow) || undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
   permissionCatalog() {
     try {
       const catalog = this.permissionService()?.catalog?.();

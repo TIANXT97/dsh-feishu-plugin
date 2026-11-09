@@ -201,9 +201,9 @@ test("runCard keeps one unified process panel and counts thinking and tools", ()
   const panels = card.body.elements.filter((element) => element.tag === "collapsible_panel");
   assert.equal(panels.length, 1, "one unified panel instead of separate drawers");
   const panelTitle = panels[0].header.title.content;
-  assert.match(panelTitle, /💭2/);
+  assert.match(panelTitle, /💬2/);
   assert.match(panelTitle, /🔧2/);
-  assert.match(panelTitle, /⏱/);
+  assert.match(panelTitle, /🕐/);
   const body = panels[0].elements[0].content;
   assert.match(body, /💭 第 1 步/);
   assert.match(body, /🔧 工具（第 1 步）/);
@@ -629,4 +629,29 @@ test("run cards rotate to a fresh card after a question is answered", async () =
   assert.equal(patches.length, 1);
   assert.match(JSON.stringify(patches[0].card), /回答已提交/);
   runs.dispose();
+});
+
+test("runCard panel header carries fry-style context and token metrics", () => {
+  const card = runCard({
+    run: {
+      sessionId: "s",
+      status: "running",
+      startedAt: Date.now(),
+      model: "router-box-01/River-Deepseek-flash",
+      tools: [],
+      toolTotal: 0,
+      reasoningSteps: [{ step: 1, text: "想一下" }],
+      usage: { inputTokens: 2_000, cacheReadTokens: 24_000, outputTokens: 4_000 },
+      contextWindow: 1_000_000,
+      streamingText: "正文",
+    },
+    maxAnswerChars: 4_000,
+  });
+  const panel = card.body.elements.find((element) => element.tag === "collapsible_panel");
+  const title = panel.header.title.content;
+  assert.match(title, /River-Deepseek-flash/);
+  assert.doesNotMatch(title, /router-box-01/, "model name is shortened to its tail");
+  assert.match(title, /26\.0k\/1\.0m \(3%\)/);
+  assert.match(title, /🧮 4\.0k/);
+  assert.equal(panel.header.icon_position, "right", "chevron sits on the right");
 });

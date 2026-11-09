@@ -263,6 +263,7 @@ export class RunCards {
           maxAnswerChars: this.config.maxAnswerChars,
           streaming: run.streamingEnabled === true && !run.finished,
         });
+        run.contextWindow ??= this.bridge.contextWindowOf?.(run.sessionId);
         const answerText = answerTextOf(card);
         const chrome = chromeFingerprint(run);
         // Only the answer moved: let the typewriter carry it and skip a full
