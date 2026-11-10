@@ -14,7 +14,7 @@ import { describeError, maskId } from "./utils.js";
 export { Config };
 export const name = "dsh-feishu-plugin";
 const BUILD_TAG = "0.5.21";
-export const inject = ["sessionController", "sessions"];
+export const inject = ["sessionController", "sessions", "workspaceRegistry"];
 
 export async function apply(ctx, rawConfig) {
   const config = resolveConfig(rawConfig);

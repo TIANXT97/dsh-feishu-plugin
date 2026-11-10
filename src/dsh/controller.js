@@ -50,6 +50,36 @@ export class DshBridge {
     );
   }
 
+  workspaceRegistry() {
+    return this.ctx.get?.("workspaceRegistry") ?? this.ctx.workspaceRegistry;
+  }
+
+  /**
+   * Resolve (and create when needed) the Workspace that owns `cwd`, so a
+   * session created through the Feishu channel lands under that workspace in
+   * the Web sidebar instead of only in the flat session list.
+   * Returns undefined when the workspace domain is unavailable or fails; the
+   * caller then falls back to the plain cwd path.
+   */
+  async workspaceFor(cwd) {
+    try {
+      const registry = this.workspaceRegistry();
+      this.log?.info?.("[feishu] 正在匹配工作区", { cwd, hasRegistry: !!registry });
+      if (!registry) return void 0;
+      const existing = await registry.resolveByPath(cwd);
+      if (existing) {
+        this.log?.info?.("[feishu] 找到已有工作区", { cwd, workspaceId: existing.id, title: existing.title });
+        return existing;
+      }
+      const created = await registry.create(cwd);
+      this.log?.info?.("[feishu] 自动创建新工作区", { cwd, workspaceId: created?.id });
+      return created;
+    } catch (error) {
+      this.log?.warn?.("[feishu] 解析工作区失败，回退到 cwd", { cwd, error: String(error) });
+      return void 0;
+    }
+  }
+
   async listSummaries(force = false) {
     const now = Date.now();
     if (!force && now - this.summaryAt < 2_000 && this.summaryCache.size > 0) {
@@ -420,7 +450,17 @@ export class DshBridge {
     const { mkdir } = await import("node:fs/promises");
     await mkdir(check.path, { recursive: true });
 
-    const created = await this.controller().create({ cwd: check.path });
+    const created = await (async () => {
+      const workspace = await this.workspaceFor(check.path);
+      if (workspace?.id !== void 0) {
+        try {
+          return await this.controller().create({ workspaceId: workspace.id });
+        } catch (error) {
+          this.log?.warn?.("[feishu] 按工作区创建会话失败，回退到 cwd", { workspaceId: workspace.id, error: String(error) });
+        }
+      }
+      return await this.controller().create({ cwd: check.path });
+    })();
     const sessionId = str(created.sessionId);
     if (!sessionId) throw new Error("创建会话失败：未返回 sessionId");
 
