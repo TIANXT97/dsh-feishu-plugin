@@ -89,7 +89,6 @@ export class RunCards {
       tools: [],
       toolTotal: 0,
       reasoningSteps: [],
-      sequence: 0,
       text: "",
       streamingText: "",
       streamingReasoning: "",
@@ -130,7 +129,6 @@ export class RunCards {
           run.messageId = sent.messageId;
           run.cardId = sent.cardId || created.cardId;
           run.streamingEnabled = true;
-          run.sequence = 0;
           run.stream = new CardStream({
             cardkit: this.cardkit,
             log: this.log,
@@ -138,6 +136,9 @@ export class RunCards {
             elementId: RUN_ANSWER_ELEMENT_ID,
             baseThrottleMs: this.config.streamThrottleMs,
             maxChars: 30_000,
+            onSequence: (cardId, sequence) => {
+              this.state.touchLiveCard?.(run.sessionId, { cardId, sequence });
+            },
             onRollover: async () => {
               const fresh = runCard({
                 run: { ...run, text: "", streamingText: "" },
@@ -153,7 +154,17 @@ export class RunCards {
               });
               if (!message.ok) return undefined;
               run.rolloverMessageIds = [...(run.rolloverMessageIds ?? []), message.messageId];
-              return { cardId: message.cardId || next.cardId, elementId: RUN_ANSWER_ELEMENT_ID };
+              const newCardId = message.cardId || next.cardId;
+              this.state.setLiveCard?.(run.sessionId, {
+                messageId: message.messageId,
+                cardId: newCardId,
+                chatId: run.chatId,
+                threadId: run.threadId,
+                turn: run.turn,
+                startedAt: run.startedAt,
+                sequence: 0,
+              });
+              return { cardId: newCardId, elementId: RUN_ANSWER_ELEMENT_ID };
             },
           });
           this.state.setLiveCard?.(run.sessionId, {
@@ -163,6 +174,7 @@ export class RunCards {
             threadId: run.threadId,
             turn: run.turn,
             startedAt: run.startedAt,
+            sequence: 0,
           });
           return run;
         }
@@ -215,7 +227,6 @@ export class RunCards {
       tools: [],
       toolTotal: 0,
       reasoningSteps: [],
-      sequence: 0,
       text: "",
       streamingText: "",
       streamingReasoning: "",
@@ -275,13 +286,13 @@ export class RunCards {
         }
         const result =
           run.cardId && this.cardkit
-            ? await this.cardkit.updateCard(
-                run.cardId,
-                card,
-                (run.sequence = ((run.sequence ?? 0) % 2_147_483_647) + 1),
-              )
+            ? await this.cardkit.updateCard(run.cardId, card)
             : await this.sender.patchCard(run.messageId, card);
         if (result.ok) {
+          this.state.touchLiveCard?.(run.sessionId, {
+            cardId: run.cardId,
+            sequence: this.cardkit.last?.(run.cardId),
+          });
           run.lastChrome = chrome;
           run.lastAnswer = answerText;
         } else {
@@ -373,15 +384,18 @@ export class RunCards {
     for (const sessionId of sessionIds) {
       const info = entries[sessionId] ?? {};
       try {
-        // The previous counter is unknown, so jump to the top of int32.
-        const sequence = 2_147_483_646;
+        // Resume the sequence the previous process saved for this card when it
+        // has one; otherwise the fresh counter starts at 1 and Feishu may
+        // reject the update (300317) — the im.message.patch fallback below
+        // still fixes the card without any sequence.
+        this.cardkit.adopt?.(info.cardId, info.sequence);
         if (info.cardId) {
-          const closed = await this.cardkit.closeStreaming(info.cardId, sequence, "回合已中断（DSH 重启）");
+          const closed = await this.cardkit.closeStreaming(info.cardId, "回合已中断（DSH 重启）");
           if (!closed.ok) this.log.warn("收尾遗留卡片：关闭流式失败", { sessionId, error: closed.error });
         }
         const card = await this.interruptedCard(info);
         let applied = info.cardId
-          ? await this.cardkit.updateCard(info.cardId, card, sequence + 1)
+          ? await this.cardkit.updateCard(info.cardId, card)
           : { ok: false, error: "missing cardId" };
         if (!applied.ok && info.messageId) applied = await this.sender.patchCard(info.messageId, card);
         if (!applied.ok) throw new Error(applied.error ?? "card update failed");

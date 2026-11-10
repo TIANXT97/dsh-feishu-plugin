@@ -61,6 +61,7 @@ function normalize(raw) {
         threadId: str(value.threadId),
         turn: Number(value.turn) || 0,
         startedAt: Number(value.startedAt) || 0,
+        sequence: Number(value.sequence) || 0,
       };
     }
   }
@@ -163,7 +164,24 @@ export class StateStore {
       threadId: str(info?.threadId),
       turn: Number(info?.turn) || 0,
       startedAt: Number(info?.startedAt) || Date.now(),
+      sequence: Number(info?.sequence) || 0,
     };
+    void this.save();
+  }
+
+  /**
+   * Track the last card sequence the live card consumed, so a restarted
+   * process can keep Feishu's "strictly increasing" rule instead of guessing.
+   * Ignores writes for a card that has since been replaced (rollover).
+   */
+  touchLiveCard(sessionId, { cardId, sequence } = {}) {
+    const sid = str(sessionId);
+    const entry = this.state.liveCards[sid];
+    if (!sid || !entry) return;
+    if (cardId && entry.cardId && str(cardId) !== entry.cardId) return;
+    const value = Number(sequence);
+    if (!Number.isInteger(value) || value <= (Number(entry.sequence) || 0)) return;
+    entry.sequence = value;
     void this.save();
   }
 

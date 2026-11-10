@@ -12,7 +12,7 @@ const HUGE_BYTES = 40 * 1024;
 const LARGE_MS = 500;
 const HUGE_MS = 800;
 
-/** Same counter the card API expects: int32, per card. */
+/** int32 ceiling for a card sequence; the counter itself lives in cardkit. */
 export const MAX_SEQUENCE = 2_147_483_647;
 
 function bytesOf(text) {
@@ -28,6 +28,9 @@ export class CardStream {
    * @param options.baseThrottleMs - interval used while the payload is small.
    * @param options.maxChars - roll over to a new card above this many characters.
    * @param options.onRollover - async callback returning `{ cardId, elementId }` for the next card.
+   * @param options.onSequence - called after each accepted write with the
+   *   card id and the sequence just consumed, so the caller can persist the
+   *   counter and survive a restart.
    */
   constructor({
     cardkit,
@@ -37,6 +40,7 @@ export class CardStream {
     baseThrottleMs = 300,
     maxChars = 30_000,
     onRollover,
+    onSequence,
   }) {
     this.cardkit = cardkit;
     this.log = log;
@@ -45,8 +49,8 @@ export class CardStream {
     this.baseThrottleMs = Math.max(100, Number(baseThrottleMs) || 300);
     this.maxChars = Math.max(100, Number(maxChars) || 30_000);
     this.onRollover = onRollover;
+    this.onSequence = onSequence;
     this.content = "";
-    this.sequence = 0;
     this.okCount = 0;
     this.failed = false;
     this.closed = false;
@@ -96,14 +100,11 @@ export class CardStream {
     this.inflight = true;
     this.dirty = false;
     try {
-      const result = await this.cardkit.updateElement(
-        this.cardId,
-        this.elementId,
-        this.content || "...",
-        (this.sequence = (this.sequence % MAX_SEQUENCE) + 1),
-      );
-      if (result.ok) this.okCount += 1;
-      else this.markFailed(result.error);
+      const result = await this.cardkit.updateElement(this.cardId, this.elementId, this.content || "...");
+      if (result.ok) {
+        this.okCount += 1;
+        this.onSequence?.(this.cardId, this.cardkit.last?.(this.cardId));
+      } else this.markFailed(result.error);
     } catch (error) {
       this.markFailed(error instanceof Error ? error.message : String(error));
     } finally {
@@ -115,11 +116,10 @@ export class CardStream {
   /** Seal the current card and continue in a fresh one supplied by the caller. */
   async rollover() {
     try {
-      await this.cardkit.closeStreaming(
-        this.cardId,
-        (this.sequence = (this.sequence % MAX_SEQUENCE) + 1),
-        this.content.slice(0, 60),
-      );
+      await this.cardkit.closeStreaming(this.cardId, this.content.slice(0, 60));
+      this.onSequence?.(this.cardId, this.cardkit.last?.(this.cardId));
+      // The old card is sealed and abandoned, so drop its counter.
+      this.cardkit.forget?.(this.cardId);
       const next = await this.onRollover?.(this.content);
       if (!next?.cardId) {
         this.markFailed("rollover target missing");
@@ -127,7 +127,6 @@ export class CardStream {
       }
       this.cardId = next.cardId;
       this.elementId = next.elementId ?? this.elementId;
-      this.sequence = 0;
       this.content = "";
     } catch (error) {
       this.markFailed(error instanceof Error ? error.message : String(error));
@@ -150,19 +149,15 @@ export class CardStream {
     if (!this.failed && this.cardId) {
       try {
         if (this.content) {
-          await this.cardkit.updateElement(
-            this.cardId,
-            this.elementId,
-            this.content,
-            (this.sequence = (this.sequence % MAX_SEQUENCE) + 1),
-          );
+          await this.cardkit.updateElement(this.cardId, this.elementId, this.content);
+          this.onSequence?.(this.cardId, this.cardkit.last?.(this.cardId));
         }
       } catch {
         /* the close below still fixes the preview */
       }
     }
     if (!this.cardId) return { ok: false, error: "missing cardId" };
-    return this.cardkit.closeStreaming(this.cardId, (this.sequence = (this.sequence % MAX_SEQUENCE) + 1), summary);
+    return this.cardkit.closeStreaming(this.cardId, summary);
   }
 
   /** Wait for an in-flight request (used before the terminal patch). */

@@ -48,16 +48,19 @@ test("createCard and sendByReference use the card entity content shape", async (
   assert.deepEqual(content, { type: "card", data: { card_id: "card_1" } });
 });
 
-test("patchElements builds partial_update_element actions", async () => {
+test("cardkit owns the per-card sequence and advances it across calls", async () => {
   const client = fakeClient();
   const kit = createCardKit(client, {});
-  const res = await kit.patchElements("card_1", [{ elementId: "run_answer", partial: { content: "hi" } }], 7);
-  assert.equal(res.ok, true);
-  const data = client.calls.at(-1).payload.data;
-  assert.equal(data.sequence, 7);
-  assert.deepEqual(data.actions, [
+  const res1 = await kit.patchElements("card_1", [{ elementId: "run_answer", partial: { content: "hi" } }]);
+  assert.equal(res1.ok, true);
+  const data1 = client.calls.at(-1).payload.data;
+  assert.equal(data1.sequence, 1);
+  assert.deepEqual(data1.actions, [
     { action: "partial_update_element", params: { element_id: "run_answer", partial_element: { content: "hi" } } },
   ]);
+  const res2 = await kit.patchElements("card_1", [{ elementId: "run_answer", partial: { content: "hi!" } }]);
+  assert.equal(res2.ok, true);
+  assert.equal(client.calls.at(-1).payload.data.sequence, 2);
 });
 
 test("CardStream coalesces pushes and lands the newest text", async () => {

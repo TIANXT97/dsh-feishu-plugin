@@ -15,14 +15,51 @@ function fail(error) {
 /**
  * Wrap the CardKit subset the bridge needs.
  *
- * Every mutating call takes an explicit `sequence`: Feishu compares it per card
- * and rejects anything that does not advance, so the caller owns the counter.
+ * Feishu compares `sequence` per card and rejects anything that does not
+ * advance (code 300317), so this client is the single owner of one counter
+ * per card: callers no longer pass sequence numbers, and whole-card updates
+ * share the exact counter with element-level streaming writes.
  *
  * @param client - Lark SDK client.
  * @param log - bridge logger.
  */
 export function createCardKit(client, log) {
+  /** cardId -> last sequence this process issued for the card. */
+  const sequences = new Map();
+
+  /** Issue the next sequence for a card. */
+  function take(cardId) {
+    const next = (sequences.get(cardId) ?? 0) + 1;
+    if (next > MAX_SEQUENCE) throw new Error(`sequence 用尽: ${cardId}`);
+    sequences.set(cardId, next);
+    return next;
+  }
+
+  /**
+   * Seed the counter for a card created by a previous process (restart
+   * recovery). Takes the larger of the saved and the local value, so a stale
+   * snapshot can never move the counter backwards.
+   */
+  function adopt(cardId, last) {
+    const value = Number(last);
+    if (!Number.isInteger(value) || value <= 0) return false;
+    if (value > (sequences.get(cardId) ?? 0)) sequences.set(cardId, value);
+    return true;
+  }
+
+  /** Drop the counter, e.g. for a card sealed and replaced by a rollover. */
+  function forget(cardId) {
+    sequences.delete(cardId);
+  }
+
   return {
+    /** Last sequence issued for a card (used to persist the counter). */
+    last(cardId) {
+      return sequences.get(cardId);
+    },
+    adopt,
+    forget,
+
     /** Create a card entity from card JSON 2.0 and return its id. */
     async createCard(card) {
       try {
@@ -72,14 +109,15 @@ export function createCardKit(client, log) {
     },
 
     /** Replace one element's content (the typewriter path). */
-    async updateElement(cardId, elementId, content, sequence) {
+    async updateElement(cardId, elementId, content) {
       if (!cardId) return { ok: false, error: "missing cardId" };
+      const sequence = take(cardId);
       try {
         const res = await client.cardkit.v1.cardElement.content({
           path: { card_id: cardId, element_id: elementId },
           data: {
             content,
-            sequence: Math.min(sequence, MAX_SEQUENCE),
+            sequence,
             uuid: `e_${cardId}_${elementId}_${sequence}`,
           },
         });
@@ -95,8 +133,9 @@ export function createCardKit(client, log) {
      *
      * @param updates - `[{ elementId, partial }]`; `partial` is merged into the element.
      */
-    async patchElements(cardId, updates, sequence) {
+    async patchElements(cardId, updates) {
       if (!cardId || updates.length === 0) return { ok: false, error: "nothing to patch" };
+      const sequence = take(cardId);
       try {
         const res = await client.cardkit.v1.card.batchUpdate({
           path: { card_id: cardId },
@@ -105,7 +144,7 @@ export function createCardKit(client, log) {
               action: "partial_update_element",
               params: { element_id: elementId, partial_element: partial },
             })),
-            sequence: Math.min(sequence, MAX_SEQUENCE),
+            sequence,
             uuid: `b_${cardId}_${sequence}`,
           },
         });
@@ -117,14 +156,15 @@ export function createCardKit(client, log) {
     },
 
     /** Replace the whole card JSON of an existing entity (chrome updates). */
-    async updateCard(cardId, card, sequence) {
+    async updateCard(cardId, card) {
       if (!cardId) return { ok: false, error: "missing cardId" };
+      const sequence = take(cardId);
       try {
         const res = await client.cardkit.v1.card.update({
           path: { card_id: cardId },
           data: {
             card: { type: "card_json", data: JSON.stringify(card) },
-            sequence: Math.min(sequence, MAX_SEQUENCE),
+            sequence,
             uuid: `u_${cardId}_${sequence}`,
           },
         });
@@ -136,8 +176,9 @@ export function createCardKit(client, log) {
     },
 
     /** Leave streaming mode and refresh the chat-list preview. */
-    async closeStreaming(cardId, sequence, summary) {
+    async closeStreaming(cardId, summary) {
       if (!cardId) return { ok: false, error: "missing cardId" };
+      const sequence = take(cardId);
       const config = { streaming_mode: false };
       if (summary !== undefined) config.summary = { content: summary };
       try {
@@ -145,7 +186,7 @@ export function createCardKit(client, log) {
           path: { card_id: cardId },
           data: {
             settings: JSON.stringify({ config }),
-            sequence: Math.min(sequence, MAX_SEQUENCE),
+            sequence,
             uuid: `s_${cardId}_${sequence}`,
           },
         });
