@@ -55,3 +55,15 @@
 2. 若没有响应，查看 `~/.dsh/feishu-plugin/feishu.log` 与
    `~/Library/Logs/dsh/dsh.err.log`。
 3. 审批卡：在话题里让模型执行需要审批的工具（或把权限预设切到高风险档），应出现「允许一次 / 拒绝」卡片。
+
+## 2026-11-10 增补（300317 序号修复 + 工作区归属回归）
+
+| 项 | 结果 |
+|---|---|
+| 300317 根因 | 整卡更新（`run.sequence`）与元素流式（`CardStream.sequence`）为同一张卡各发一个 `sequence=1`，打字机首帧即被拒、卡片永久退化为整卡重发（排查报告：`DSH 飞书通道/streamfix-sequence-300317-report.md`） |
+| 修复 | `cardkit` 成为每卡序号唯一所有者（`take/adopt/last/forget`），调用方不再传号；计数持久化进 `state.json` 的 `liveCards.sequence`，重启 `adopt` 精确续号，替代曾三次实测失败的「硬编码 2147483646」 |
+| 复现脚本 | `scripts/seq-repro.mjs`：修复前退出码 1（复现 300317）；修复后退出码 0，序号 1→2→3 严格递增 |
+| 工作区归属 | 0.5.21 上游同步时丢失的 `workspaceFor` 已回归移植，`inject` 增加 `workspaceRegistry`；飞书会话重新按工作区分组，不再落「未分组」 |
+| 携带特性防线 | 新增 `scripts/check-carried.sh`（5 项 grep 检查），已接入 `update.sh`，上游同步后自动阻断特性悄悄消失 |
+| 单元测试 | `node --test` 47 项全部通过（新增 `test/sequence-monotonic.test.mjs`：单调性回归 + 重启恢复 adopt） |
+| 上线状态 | lib 已装入 profile；待 dsh-web 空闲重启后观察 `feishu.log` 不再新增 300317、打字机逐字回归、新会话落「DSH 飞书通道」工作区 |

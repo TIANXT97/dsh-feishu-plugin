@@ -26,6 +26,9 @@ fi
 echo "==> tests"
 npm test
 
+echo "==> carried-feature checks"
+./scripts/check-carried.sh
+
 echo "==> publish dist"
 ./scripts/publish-dist.sh
 
