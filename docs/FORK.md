@@ -25,6 +25,12 @@ upstream → https://github.com/moyuanhua/dsh-feishu-plugin  (只读)
 6. **卡片序号单点所有**（`cardkit` 内每卡一个严格递增计数器）——上游从未实现；
    整卡更新与元素流式共用一张卡时不再各自从 0 发 `sequence=1`（根治飞书 300317
    与打字机首帧即失效）；计数持久化进 `state.json` liveCards，重启后 `adopt` 续号。
+7. **整卡字节预算：答案优先**（`runCard` 单点计量整卡 JSON）——上游从未实现；
+   `maxAnswerChars` 是字符上限而飞书卡片是 30KB 字节上限，中文长答原本会在
+   ~9,273 字处被兜底截断、且折叠面板还要再从答案嘴里抢字节。现在超预算时先
+   削面板（留一行占位，标题上的 💬/🔧/🕐 仍在），面板到保底才动答案，并显式
+   补「卡片已截断」说明与省略号。面板尺寸参与 `patch()` 的整卡重写判定，避免
+   只发元素时服务端留着大面板而爆 30KB。
 
 ## 上游更新流程
 
@@ -51,6 +57,8 @@ git push origin local
 | `src/index.js` 的 inject 含 `workspaceRegistry` | 工作区归属的宿主服务注入 |
 | `src/feishu/cardkit.js` 含 `function take(cardId)` | 卡片序号单点所有 |
 | `npm test` 中 `sequence-monotonic` 通过 | 序号严格递增回归网 |
+| `src/cards.js` 含 `panelBodyFor` | 整卡字节预算（答案优先、面板让位） |
+| `src/dsh/runs.js` 含 `built.panelBytes` | 面板尺寸变化触发整卡重写 |
 
 历史上踩过的同类坑（复查时对着验证）：
 

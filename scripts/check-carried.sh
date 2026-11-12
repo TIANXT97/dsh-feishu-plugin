@@ -23,6 +23,8 @@ check "工作区注入（workspaceRegistry）"  src/index.js           "workspac
 check "卡片序号单点所有（take）"         src/feishu/cardkit.js  "function take(cardId)"
 check "序号持久化（touchLiveCard）"      src/state.js           "touchLiveCard"
 check "恢复路径 adopt"                   src/dsh/runs.js        "adopt?.(info.cardId"
+check "整卡字节预算（答案优先）"          src/cards.js           "panelBodyFor"
+check "面板尺寸参与整卡重写判定"          src/dsh/runs.js        "built.panelBytes"
 
 if [ "$fail" -ne 0 ]; then
   cat >&2 <<'EOF'
