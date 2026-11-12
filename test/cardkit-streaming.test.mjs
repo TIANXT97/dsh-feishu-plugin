@@ -99,26 +99,26 @@ test("close pushes the final text then leaves streaming mode", async () => {
   assert.deepEqual(settings.config, { streaming_mode: false, summary: { content: "done" } });
 });
 
-test("CardStream rolls over to a new card past maxChars", async () => {
+test("CardStream no longer rolls over: 长答案由 finish() 的分卡投递负责", async () => {
   const client = fakeClient();
   const kit = createCardKit(client, {});
-  let created = 0;
   const stream = new CardStream({
     cardkit: kit,
     cardId: "card_1",
     elementId: "run_answer",
     baseThrottleMs: 50,
-    maxChars: 100,
-    onRollover: async () => {
-      created += 1;
-      return { cardId: `card_next_${created}`, elementId: "run_answer" };
-    },
   });
-  stream.push("x".repeat(500));
-  await new Promise((resolve) => setTimeout(resolve, 150));
-  assert.equal(created, 1);
-  assert.equal(stream.cardId, "card_next_1");
-  assert.equal(client.calls.some((call) => call.tag === "card.settings"), true);
+  stream.push("x".repeat(30_000));
+  // 30KB 的内容会走大负载节流（500ms），等它真的 flush 一次。
+  await new Promise((resolve) => setTimeout(resolve, 700));
+  // 只写当前卡的答案元素，不创建新卡、不关流。
+  assert.deepEqual(
+    [...new Set(client.calls.map((call) => call.tag))],
+    ["card.content"],
+    "只有一个元素写入，没有 create/settings",
+  );
+  assert.equal(stream.cardId, "card_1");
+  assert.equal(stream.okCount, 1);
 });
 
 test("RunCards streams the answer element and only replaces the card on chrome changes", async () => {
@@ -306,5 +306,63 @@ test("长答案让面板让位时，patch 走整卡写入（否则服务端会�
   await runs.patch(run);
   await new Promise((resolve) => setTimeout(resolve, 120));
   assert.equal(calls.filter((call) => call === "card").length, cardCount, "无变化时退回元素流式");
+  runs.dispose();
+});
+
+test("出错的回合也会把长答案分卡投递（不再整段丢掉）", async () => {
+  const { RunCards } = await import("../src/dsh/runs.js");
+  const sent = [];
+  const runs = new RunCards({
+    bridge: {},
+    sender: {
+      async replyCard(anchor, card) {
+        sent.push(card);
+        return { ok: true, messageId: `om_part_${sent.length}` };
+      },
+      async patchCard() {
+        return { ok: true };
+      },
+      async sendCard() {
+        return { ok: false };
+      },
+    },
+    state: {},
+    config: { maxAnswerChars: 4_000, streamThrottleMs: 50 },
+    log: { debug() {}, info() {}, warn() {} },
+  });
+  const longAnswer = "字".repeat(12_000); // 36KB，必须分卡
+  const run = {
+    sessionId: "session-error-split",
+    chatId: "oc_chat",
+    messageId: "om_run",
+    status: "running",
+    startedAt: Date.now(),
+    tools: [],
+    toolTotal: 0,
+    text: longAnswer,
+    streamingText: longAnswer,
+    streamingReasoning: "",
+    turn: 1,
+    step: 0,
+    error: "",
+    canStop: true,
+    finished: false,
+  };
+  runs.runs.set(run.sessionId, run);
+  runs.finish(run, "error", "boom");
+  // finish() 同步决定分段，sendParts 随后异步清空 splitParts。
+  const splitCount = run.splitParts.length;
+  await new Promise((resolve) => setTimeout(resolve, 400));
+
+  assert.equal(run.status, "error");
+  assert.equal(run.answerHidden, true, "主卡不再硬塞 12,000 字");
+  assert.ok(splitCount > 1, `拆成多段，实测 ${splitCount}`);
+  assert.ok(sent.length > 1, `应发出多张分段卡，实测 ${sent.length}`);
+  const delivered = sent
+    .flatMap((card) => card.body.elements)
+    .filter((element) => element.tag === "markdown")
+    .reduce((total, element) => total + String(element.content ?? "").length, 0);
+  assert.ok(delivered >= 11_000, `分段卡应带走绝大部分内容，实测 ${delivered}`);
+  assert.match(JSON.stringify(run.answerNote ?? ""), /分成 .* 段/);
   runs.dispose();
 });

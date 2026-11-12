@@ -32,6 +32,7 @@ export const Config = Schema.object({
   questionTtlMs: Schema.number().default(10 * 60_000),
   staleMessageMs: Schema.number().default(120_000),
   sessionPageSize: Schema.number().default(8),
+  // 字符上限;实际还受飞书 29KB 卡字节预算约束(runCard 里先削面板再截答案)
   maxAnswerChars: Schema.number().default(12_000),
   logLevel: Schema.union(["debug", "info", "warn", "error"]).default("info"),
   logFile: Schema.any(),

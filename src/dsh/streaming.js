@@ -1,6 +1,12 @@
 /**
  * Typewriter controller for one run card.
  *
+ * A card is a terminal surface for one answer: long answers are NOT rolled over
+ * to a second card here. The card is byte-budgeted (see `runCard`) and the full
+ * text is delivered as part cards by `RunCards.finish()`, so a rollover would
+ * duplicate delivery. The old `maxChars`/`onRollover` path was unreachable
+ * (the streamed text is already clamped to the card budget) and removed.
+ *
  * Mirrors the throttling strategy of the fry-cards card engine: a fixed base
  * interval for small payloads, raised adaptively as the streamed element grows,
  * because one giant element update asks the Feishu client to re-render a lot.
@@ -26,8 +32,6 @@ export class CardStream {
    * @param options.cardId - card entity id.
    * @param options.elementId - element that receives the typewriter content.
    * @param options.baseThrottleMs - interval used while the payload is small.
-   * @param options.maxChars - roll over to a new card above this many characters.
-   * @param options.onRollover - async callback returning `{ cardId, elementId }` for the next card.
    * @param options.onSequence - called after each accepted write with the
    *   card id and the sequence just consumed, so the caller can persist the
    *   counter and survive a restart.
@@ -38,8 +42,6 @@ export class CardStream {
     cardId,
     elementId,
     baseThrottleMs = 300,
-    maxChars = 30_000,
-    onRollover,
     onSequence,
   }) {
     this.cardkit = cardkit;
@@ -47,8 +49,6 @@ export class CardStream {
     this.cardId = cardId;
     this.elementId = elementId;
     this.baseThrottleMs = Math.max(100, Number(baseThrottleMs) || 300);
-    this.maxChars = Math.max(100, Number(maxChars) || 30_000);
-    this.onRollover = onRollover;
     this.onSequence = onSequence;
     this.content = "";
     this.okCount = 0;
@@ -93,10 +93,6 @@ export class CardStream {
 
   async flush() {
     if (this.closed || this.failed || !this.cardId) return;
-    if (this.content.length > this.maxChars && this.onRollover) {
-      await this.rollover();
-      return;
-    }
     this.inflight = true;
     this.dirty = false;
     try {
@@ -110,26 +106,6 @@ export class CardStream {
     } finally {
       this.inflight = false;
       if (this.dirty && !this.closed && !this.failed) this.schedule(this.delayFor(this.content));
-    }
-  }
-
-  /** Seal the current card and continue in a fresh one supplied by the caller. */
-  async rollover() {
-    try {
-      await this.cardkit.closeStreaming(this.cardId, this.content.slice(0, 60));
-      this.onSequence?.(this.cardId, this.cardkit.last?.(this.cardId));
-      // The old card is sealed and abandoned, so drop its counter.
-      this.cardkit.forget?.(this.cardId);
-      const next = await this.onRollover?.(this.content);
-      if (!next?.cardId) {
-        this.markFailed("rollover target missing");
-        return;
-      }
-      this.cardId = next.cardId;
-      this.elementId = next.elementId ?? this.elementId;
-      this.content = "";
-    } catch (error) {
-      this.markFailed(error instanceof Error ? error.message : String(error));
     }
   }
 

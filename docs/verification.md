@@ -61,7 +61,7 @@
 | 项 | 结果 |
 |---|---|
 | 300317 根因 | 整卡更新（`run.sequence`）与元素流式（`CardStream.sequence`）为同一张卡各发一个 `sequence=1`，打字机首帧即被拒、卡片永久退化为整卡重发（排查报告：`DSH 飞书通道/streamfix-sequence-300317-report.md`） |
-| 修复 | `cardkit` 成为每卡序号唯一所有者（`take/adopt/last/forget`），调用方不再传号；计数持久化进 `state.json` 的 `liveCards.sequence`，重启 `adopt` 精确续号，替代曾三次实测失败的「硬编码 2147483646」 |
+| 修复 | `cardkit` 成为每卡序号唯一所有者（`take/adopt/last`），调用方不再传号；计数持久化进 `state.json` 的 `liveCards.sequence`，重启 `adopt` 精确续号，替代曾三次实测失败的「硬编码 2147483646」 |
 | 复现脚本 | `scripts/seq-repro.mjs`：修复前退出码 1（复现 300317）；修复后退出码 0，序号 1→2→3 严格递增 |
 | 工作区归属 | 0.5.21 上游同步时丢失的 `workspaceFor` 已回归移植，`inject` 增加 `workspaceRegistry`；飞书会话重新按工作区分组，不再落「未分组」 |
 | 携带特性防线 | 新增 `scripts/check-carried.sh`（5 项 grep 检查），已接入 `update.sh`，上游同步后自动阻断特性悄悄消失 |
@@ -93,7 +93,7 @@
 | 300309 | 真机复现条件：卡片**创建时未开启 `streaming_mode`**，向其写元素即 300309；生产 `run.cardId` 均来自 `createCard(..., streaming: true)` |
 | 300313 | 代码核实：带 `element_id` 的只有 `runCard()` 的答案元素；`stripTransientElements` 只用于内存中重建的中断卡，回写卡片来自 `cardContentOf`（含 element_id）；`interruptedRunCard` 不新增元素 |
 | seq-repro.mjs | 假飞书按真机语义修正（顺序闸门 + uuid 幂等闸门）；修复前退出码 1、修复后 0 |
-| 新发现（未修） | `fitCard()` 按 29KB **字节**截断，中文回答约 ≥9,300 字会被截到 9,273 字，`maxChars: 30_000` 的滚动换卡阈值达不到 |
+| 新发现（同日已修） | `fitCard()` 按 29KB **字节**截断，中文回答约 ≥9,300 字会被截到 9,273 字 |
 
 ## 2026-11-12 增补（卡片 29KB 字节预算：答案优先，0.5.23）
 

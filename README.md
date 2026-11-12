@@ -151,7 +151,7 @@ DSH 的审批请求会变成飞书卡片：**允许一次 / 拒绝**。DSH 本�
 | `questionTtlMs` | 10 分钟 | 提问卡片有效期；超时后保留 30 分钟宽限，仍可延迟回答 |
 | `staleMessageMs` | 120 秒 | 过期消息忽略窗口 |
 | `sessionPageSize` | 8 | 会话列表每页条数 |
-| `maxAnswerChars` | 12000 | 单卡回答截断 |
+| `maxAnswerChars` | 12000 | 单卡回答的**字符**上限；飞书卡片还有 30KB 字节上限，中文实际约 9,200 字/卡 |
 | `debugLog` | `false` | **调试日志开关**（插件页可切换）；开 = 强制 `debug` 级别 |
 | `logLevel` | `info` | 基础日志级别；`debugLog` 关闭时生效 |
 | `logFile` | `~/.dsh/feishu-plugin/feishu.log` | 日志文件；`false` 关闭 |

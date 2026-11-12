@@ -74,7 +74,7 @@ git push origin local
 能新建文件就不改上游文件。新增模块：
 
 ```
-src/dsh/streaming.js    流式引擎（批量更新 / 自适应节流 / rollover）
+src/dsh/streaming.js    流式引擎（批量更新 / 自适应节流）
 src/feishu/cardkit.js   卡片实体（create / send / batch_update / close / 每卡序号所有者）
 src/dsh/recovery.js     遗留卡片收尾
 ```

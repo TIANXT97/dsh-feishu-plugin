@@ -135,36 +135,8 @@ export class RunCards {
             cardId: run.cardId,
             elementId: RUN_ANSWER_ELEMENT_ID,
             baseThrottleMs: this.config.streamThrottleMs,
-            maxChars: 30_000,
             onSequence: (cardId, sequence) => {
               this.state.touchLiveCard?.(run.sessionId, { cardId, sequence });
-            },
-            onRollover: async () => {
-              const fresh = runCard({
-                run: { ...run, text: "", streamingText: "" },
-                maxAnswerChars: this.config.maxAnswerChars,
-                streaming: true,
-              });
-              const next = await this.cardkit.createCard(fresh);
-              if (!next.ok) return undefined;
-              const message = await this.cardkit.sendByReference({
-                chatId: run.chatId,
-                cardId: next.cardId,
-                replyInThread: Boolean(run.threadId),
-              });
-              if (!message.ok) return undefined;
-              run.rolloverMessageIds = [...(run.rolloverMessageIds ?? []), message.messageId];
-              const newCardId = message.cardId || next.cardId;
-              this.state.setLiveCard?.(run.sessionId, {
-                messageId: message.messageId,
-                cardId: newCardId,
-                chatId: run.chatId,
-                threadId: run.threadId,
-                turn: run.turn,
-                startedAt: run.startedAt,
-                sequence: 0,
-              });
-              return { cardId: newCardId, elementId: RUN_ANSWER_ELEMENT_ID };
             },
           });
           this.state.setLiveCard?.(run.sessionId, {
@@ -327,7 +299,9 @@ export class RunCards {
       run.patchTimer = undefined;
     }
     let splitParts = [];
-    if (status === "done" || status === "stopped") {
+    // An errored turn still has partial output worth delivering; only a
+    // continued card has no answer of its own to split.
+    if (status === "done" || status === "stopped" || status === "error") {
       const answer = String(run.text || run.streamingText || "").trim();
       if (answer) {
         // Keep three tables per card: the documented limit is five, but a
@@ -582,7 +556,7 @@ export class RunCards {
         ? await this.sender.replyCard(run.messageId, card)
         : { ok: false, error: "missing run card" };
       if (!sent.ok && run.chatId) sent = await this.sender.sendCard(run.chatId, card);
-      if (!sent.ok) this.log.warn("回答分段卡片发送失败", { sessionId: run.sessionId, index: i + 2, error: sent.error });
+      if (!sent.ok) this.log.warn("回答分段卡片发送失败", { sessionId: run.sessionId, index: i + 1, error: sent.error });
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
   }

@@ -172,7 +172,7 @@ export class StateStore {
   /**
    * Track the last card sequence the live card consumed, so a restarted
    * process can keep Feishu's "strictly increasing" rule instead of guessing.
-   * Ignores writes for a card that has since been replaced (rollover).
+   * Ignores writes for a card that is no longer the session's live card.
    */
   touchLiveCard(sessionId, { cardId, sequence } = {}) {
     const sid = str(sessionId);

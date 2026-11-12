@@ -47,18 +47,12 @@ export function createCardKit(client, log) {
     return true;
   }
 
-  /** Drop the counter, e.g. for a card sealed and replaced by a rollover. */
-  function forget(cardId) {
-    sequences.delete(cardId);
-  }
-
   return {
     /** Last sequence issued for a card (used to persist the counter). */
     last(cardId) {
       return sequences.get(cardId);
     },
     adopt,
-    forget,
 
     /** Create a card entity from card JSON 2.0 and return its id. */
     async createCard(card) {
