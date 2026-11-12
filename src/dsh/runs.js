@@ -269,14 +269,21 @@ export class RunCards {
     run.patchQueued = true;
     run.patchChain = (run.patchChain ?? Promise.resolve())
       .then(async () => {
+        const built = {};
         const card = runCard({
           run,
           maxAnswerChars: this.config.maxAnswerChars,
           streaming: run.streamingEnabled === true && !run.finished,
+          meta: built,
         });
         run.contextWindow ??= this.bridge.contextWindowOf?.(run.sessionId);
         const answerText = answerTextOf(card);
-        const chrome = chromeFingerprint(run);
+        // The typewriter only rewrites the answer element on the server, so any
+        // change to the rest of the card has to go through a full write. That
+        // includes the panel shaving itself down to make room for a long answer:
+        // an element-only update would leave the bigger panel in place and blow
+        // the 30KB ceiling.
+        const chrome = `${chromeFingerprint(run)}|p${built.panelBytes ?? 0}|c${built.truncated ? 1 : 0}`;
         // Only the answer moved: let the typewriter carry it and skip a full
         // card replace, which would also re-render every other element.
         if (run.stream && !run.stream.failed && !force && chrome === run.lastChrome) {

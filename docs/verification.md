@@ -67,3 +67,30 @@
 | 携带特性防线 | 新增 `scripts/check-carried.sh`（5 项 grep 检查），已接入 `update.sh`，上游同步后自动阻断特性悄悄消失 |
 | 单元测试 | `node --test` 47 项全部通过（新增 `test/sequence-monotonic.test.mjs`：单调性回归 + 重启恢复 adopt） |
 | 上线状态 | lib 已装入 profile；待 dsh-web 空闲重启后观察 `feishu.log` 不再新增 300317、打字机逐字回归、新会话落「DSH 飞书通道」工作区 |
+
+## 2026-11-12 增补（300317 修复的线上验收）
+
+排查报告：`/data/home/DSH 飞书通道/streamfix-sequence-300317-report.md` §9。
+
+| 项 | 结果 |
+|---|---|
+| 源码/构建 | `local` HEAD `9477c45`（0.5.22），仓库 `lib/index.js` 与 profile 安装产物 `cmp` 相同（6,467,879 字节）；bundle 内 `function take(cardId)` ×1、`const sequence = take(cardId)` ×4，无 `Math.min(…sequence…)` |
+| 复现脚本 | `scripts/seq-repro.mjs` 退出码 **0**，序号 1→2→3 严格递增 |
+| 单元测试 | `pnpm test` **47 通过 / 0 失败** |
+| 线上日志 | 0.5.22 起点（2026-11-10T06:45:44Z，日志第 9190 行）之后：`300317` **0**、`回退为整卡更新` **0**、`收尾遗留卡片` **0**；最后一次 300317 为 2026-11-10T01:59:48Z（修复上线前） |
+| 连接健康 | 0.5.22 起点后 204 条心跳均 `connected`；4 条 WARN 全部是 `no pong/inbound within 30s` → 自动重连，与卡片无关 |
+| 未闭合 | 只跑完 1 个完整回合（2026-11-12T01:20:41Z），需继续累计到 3–5 轮；打字机逐字效果需人工目测；`300309`/`300313` 尚未定根因 |
+
+## 2026-11-12 增补（§7 待核查项的真机探测）
+
+详情见排查报告 §10（`/data/home/DSH 飞书通道/streamfix-sequence-300317-report.md`）。
+
+| 项 | 结果 |
+|---|---|
+| sequence 语义（真机） | **只要求「大于这张卡上一次被接受的值」，不要求 +1 连续**：`1 → 4` 接受、`3` 拒 300317、`2147483646` / `2147483647` 接受 |
+| 300317 词条含义 | 「未严格递增」= 不大于上一次，与“必须依次 +1”无关；11-07 恢复路径 `2147483646` 被拒 = 那张卡已发到该值，佐证 `adopt`+`liveCards.sequence` 持久化的必要性 |
+| uuid | 重复 uuid 返回 **200770 UUID conflict**（与 sequence 无关的另一道闸门）；`u_${cardId}_${sequence}` 同卡内天然唯一 |
+| 300309 | 真机复现条件：卡片**创建时未开启 `streaming_mode`**，向其写元素即 300309；生产 `run.cardId` 均来自 `createCard(..., streaming: true)` |
+| 300313 | 代码核实：带 `element_id` 的只有 `runCard()` 的答案元素；`stripTransientElements` 只用于内存中重建的中断卡，回写卡片来自 `cardContentOf`（含 element_id）；`interruptedRunCard` 不新增元素 |
+| seq-repro.mjs | 假飞书按真机语义修正（顺序闸门 + uuid 幂等闸门）；修复前退出码 1、修复后 0 |
+| 新发现（未修） | `fitCard()` 按 29KB **字节**截断，中文回答约 ≥9,300 字会被截到 9,273 字，`maxChars: 30_000` 的滚动换卡阈值达不到 |

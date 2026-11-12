@@ -20,6 +20,59 @@ function truncateUtf8(text, maxBytes) {
   return out;
 }
 
+/** Panel body budget in characters; the byte ceiling is applied on top. */
+const PANEL_BUDGET_CHARS = 2_800;
+/** The panel is auxiliary content: never let it squeeze the answer below this. */
+const PANEL_MIN_BYTES = 320;
+
+function serializedBytes(value) {
+  return utf8Bytes(JSON.stringify(value));
+}
+
+/**
+ * Pick panel sections newest-first under a char budget and, optionally, a byte
+ * budget. The byte budget is what lets the panel give way to the answer when a
+ * card is close to Feishu's 30KB ceiling.
+ */
+function panelBodyFor(sections, { maxChars = PANEL_BUDGET_CHARS, maxBytes = Infinity, active = false } = {}) {
+  const picked = [];
+  let usedChars = 0;
+  let usedBytes = 0;
+  let index = sections.length;
+  while (index > 0) {
+    const text = sections[index - 1];
+    const addChars = text.length + (picked.length > 0 ? 2 : 0);
+    const addBytes = utf8Bytes(text) + (picked.length > 0 ? 2 : 0);
+    if (usedChars + addChars <= maxChars && usedBytes + addBytes <= maxBytes) {
+      picked.unshift(text);
+      usedChars += addChars;
+      usedBytes += addBytes;
+      index -= 1;
+      continue;
+    }
+    if (picked.length === 0) {
+      // The newest section alone is over budget: cut it by bytes and stop.
+      picked.unshift(`${truncateUtf8(text, Math.max(64, maxBytes - 64))}…`);
+      index -= 1;
+    }
+    break;
+  }
+  // 「已省略」这类提示行不能把真正的内容挤掉：字节预算吃紧时，若只挑到了
+  // 提示行，就把最新一段真实内容按字节截进来。
+  if (
+    Number.isFinite(maxBytes) &&
+    picked.length > 0 &&
+    picked.every((text) => text.startsWith("- …已省略"))
+  ) {
+    const core = [...sections].reverse().find((text) => !text.startsWith("- …已省略"));
+    if (core) picked[0] = `${truncateUtf8(core, Math.max(64, maxBytes - 64))}…`;
+  }
+  let body = picked.join("\n\n");
+  if (index > 0) body = `_…前 ${index} 段已省略_\n\n${body}`;
+  if (!body) body = active ? "_正在思考…_" : "_本回合没有思考或工具调用_";
+  return body;
+}
+
 function textNodes(elements, out = []) {
   for (const element of Array.isArray(elements) ? elements : []) {
     if (!element || typeof element !== "object") continue;
@@ -122,7 +175,8 @@ function fitCard(value) {
   return value;
 }
 
-function card({ title, template = "blue", elements = [], streaming = false }) {
+/** Build the JSON 2.0 object without the last-resort byte truncation. */
+function cardShell({ title, template = "blue", elements = [], streaming = false }) {
   const config = { update_multi: true };
   if (streaming) {
     // Declaring the streaming config in the card JSON lets Feishu animate as
@@ -135,12 +189,17 @@ function card({ title, template = "blue", elements = [], streaming = false }) {
       print_strategy: "fast",
     };
   }
-  return fitCard(limitCardTables({
+  return limitCardTables({
     schema: "2.0",
     config,
     header: { title: { tag: "plain_text", content: truncate(title, 80) }, template },
     body: { elements: elements.slice(0, 190) },
-  }));
+  });
+}
+
+/** Final card: apply the 30KB safety net once, after any local budgeting. */
+function card(options) {
+  return fitCard(cardShell(options));
 }
 
 function md(content) {
@@ -821,7 +880,12 @@ function tailTruncate(text, max) {
 /** Fixed answer element: the typewriter pushes only this element. */
 export const RUN_ANSWER_ELEMENT_ID = "run_answer";
 
-export function runCard({ run, maxAnswerChars, streaming = false }) {
+/**
+ * @param meta - optional out-param: filled with what the caller needs to know
+ *   about non-answer parts of the card (`panelBytes`, `truncated`), so a
+ *   typewriter-only patch is not used when the chrome actually changed.
+ */
+export function runCard({ run, maxAnswerChars = 12_000, streaming = false, meta }) {
   const status = run.status;
   const title =
     status === "continued"
@@ -890,19 +954,13 @@ export function runCard({ run, maxAnswerChars, streaming = false }) {
                     ? `💭 思考中：${reasoningTail}`
                     : "💭 正在思考…";
 
-  const elements = [];
-  if (!finished) elements.push(md(statusLine));
-
-  // The answer element exists from the first render: element content can only
-  // be updated on an element that is already on the card.
-  elements.push({
-    tag: "markdown",
-    element_id: RUN_ANSWER_ELEMENT_ID,
-    content: answer ? truncate(answer, maxAnswerChars) : "",
-  });
-  if (answer.length > maxAnswerChars) {
-    elements.push(note("回答过长，卡片已截断；完整内容可在 DSH Web 会话里查看。"));
-  }
+  // ---- 一张卡只有一个 29KB 预算：答案优先，面板先让位 -------------------
+  // 「maxAnswerChars」是字符上限，飞书卡片的硬约束却是字节。中文 12,000 字约
+  // 36KB，光靠字符预算必然撞 29KB，然后被 fitCard 按字节一刀切成 9,273 字。
+  // 这里先用字符预算收一次，再量整卡字节，超了先削面板（它只是折叠的辅助信
+  // 息），削到保底还超才动答案，并补一条明确的截断说明。
+  const answerCapped = answer ? truncate(answer, maxAnswerChars) : "";
+  const answerCutByChars = answer.length > maxAnswerChars;
 
   // Unified bottom panel: thinking and tools interleaved by step.
   const byStep = new Map();
@@ -925,59 +983,106 @@ export function runCard({ run, maxAnswerChars, streaming = false }) {
     }
   }
   if (totalTools > tools.length) sections.push(`- …已省略前 ${totalTools - tools.length} 次工具调用`);
-  const PANEL_BUDGET = 2_800;
-  const picked = [];
-  let usedChars = 0;
-  for (let index = sections.length - 1; index >= 0; index -= 1) {
-    const sectionText = sections[index];
-    if (picked.length > 0 && usedChars + sectionText.length > PANEL_BUDGET) break;
-    picked.unshift(sectionText);
-    usedChars += sectionText.length;
-  }
-  const omittedSections = sections.length - picked.length;
-  let panelBody = picked.join("\n\n");
-  if (omittedSections > 0) panelBody = `_…前 ${omittedSections} 段已省略_\n\n${panelBody}`;
-  if (!panelBody) panelBody = active ? "_正在思考…_" : "_本回合没有思考或工具调用_";
+
   const panelBorder =
     status === "done" ? "green" : status === "error" ? "red" : status === "stopped" ? "yellow" : "grey";
   const showPanel = active || stepList.length > 0 || totalTools > 0 || Boolean(run.error);
-  if (showPanel) {
-    const panelParts = [];
-    if (run.model) panelParts.push(`🍟 ${shortModelName(run.model)}`);
-    panelParts.push(`💬${stepList.length}`);
-    panelParts.push(`🔧${totalTools}`);
-    const contextUsed =
-      (Number(run.usage?.inputTokens) || 0) + (Number(run.usage?.cacheReadTokens) || 0);
-    const contextMax = Number(run.contextWindow) || 0;
-    if (contextUsed > 0 && contextMax > 0) {
-      const pct = Math.max(1, Math.round((contextUsed / contextMax) * 100));
-      panelParts.push(`${compactCount(contextUsed)}/${compactCount(contextMax)} (${pct}%)`);
+
+  // Declared before `build` so the closure never reads a binding in TDZ.
+  let cutNote = answerCutByChars;
+
+  const build = ({ answerContent, panelBody, withPanel = showPanel }) => {
+    const elements = [];
+    if (!finished) elements.push(md(statusLine));
+
+    // The answer element exists from the first render: element content can only
+    // be updated on an element that is already on the card.
+    elements.push({
+      tag: "markdown",
+      element_id: RUN_ANSWER_ELEMENT_ID,
+      content: answerContent,
+    });
+    if (cutNote) {
+      elements.push(note("回答过长，卡片已截断；完整内容可在 DSH Web 会话里查看。"));
     }
-    if (Number(run.usage?.outputTokens) > 0) panelParts.push(`🧮 ${compactCount(run.usage.outputTokens)}`);
-    panelParts.push(`🕐 ${formatDuration(elapsed)}`);
-    elements.push(
-      collapsiblePanel({
-        title: panelParts.join(" · "),
-        expanded: false,
-        border: panelBorder,
-        body: panelBody,
-        iconPosition: "right",
-      }),
-    );
-  }
 
-  const footerParts = [];
-  if (run.perm) footerParts.push(`🔐 ${run.perm}`);
-  if (answer.length > 0) footerParts.push(`✍️ ${answer.length} 字`);
-  if (run.turn) footerParts.push(`第 ${run.turn} 轮`);
-  if (run.error) footerParts.push(`⚠️ ${truncate(run.error, 200)}`);
-  if (footerParts.length) elements.push(note(footerParts.join(" · ")));
+    if (withPanel) {
+      const panelParts = [];
+      if (run.model) panelParts.push(`🍟 ${shortModelName(run.model)}`);
+      panelParts.push(`💬${stepList.length}`);
+      panelParts.push(`🔧${totalTools}`);
+      const contextUsed =
+        (Number(run.usage?.inputTokens) || 0) + (Number(run.usage?.cacheReadTokens) || 0);
+      const contextMax = Number(run.contextWindow) || 0;
+      if (contextUsed > 0 && contextMax > 0) {
+        const pct = Math.max(1, Math.round((contextUsed / contextMax) * 100));
+        panelParts.push(`${compactCount(contextUsed)}/${compactCount(contextMax)} (${pct}%)`);
+      }
+      if (Number(run.usage?.outputTokens) > 0) panelParts.push(`🧮 ${compactCount(run.usage.outputTokens)}`);
+      panelParts.push(`🕐 ${formatDuration(elapsed)}`);
+      elements.push(
+        collapsiblePanel({
+          title: panelParts.join(" · "),
+          expanded: false,
+          border: panelBorder,
+          body: panelBody,
+          iconPosition: "right",
+        }),
+      );
+    }
 
-  if (run.answerNote) elements.push(note(run.answerNote));
-  if (run.canStop) {
-    elements.push(button("⏹ 强制停止", "danger", { a: "stop", s: run.sessionId }));
+    const footerParts = [];
+    if (run.perm) footerParts.push(`🔐 ${run.perm}`);
+    if (answer.length > 0) footerParts.push(`✍️ ${answer.length} 字`);
+    if (run.turn) footerParts.push(`第 ${run.turn} 轮`);
+    if (run.error) footerParts.push(`⚠️ ${truncate(run.error, 200)}`);
+    if (footerParts.length) elements.push(note(footerParts.join(" · ")));
+
+    if (run.answerNote) elements.push(note(run.answerNote));
+    if (run.canStop) {
+      elements.push(button("⏹ 强制停止", "danger", { a: "stop", s: run.sessionId }));
+    }
+    return cardShell({ title, template, elements, streaming });
+  };
+
+  let answerContent = answerCapped;
+  let panelMaxBytes = Infinity;
+  let panelMode = showPanel ? "full" : "none";
+  let built;
+  let panelBytes = 0;
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    const panelBody =
+      panelMode === "none"
+        ? ""
+        : panelMode === "stub"
+          ? `_…过程面板过长，已省略 ${sections.length} 段_`
+          : panelBodyFor(sections, { maxChars: PANEL_BUDGET_CHARS, maxBytes: panelMaxBytes, active });
+    built = build({ answerContent, panelBody, withPanel: panelMode !== "none" });
+    panelBytes = panelMode === "none" ? 0 : utf8Bytes(panelBody);
+    const over = serializedBytes(built) - MAX_CARD_BYTES;
+    if (over <= 0) break;
+    // 面板先让位：压到刚好补上缺口（留 64B 余量）；压到保底就退成一行占位，
+    // 这样标题上的 💬/🔧/🕐 还在，不会凭空消失一整块信息。
+    if (panelMode === "full" && panelBytes - PANEL_MIN_BYTES > 64) {
+      panelMaxBytes = Math.max(PANEL_MIN_BYTES, panelBytes - over - 64);
+      continue;
+    }
+    if (panelMode === "full") {
+      panelMode = "stub";
+      continue;
+    }
+    if (!answerContent) break;
+    // 按字节收到刚好，并补一个省略号（先去掉字符预算留下的那个，免得变成「……」）。
+    const target = Math.max(0, utf8Bytes(answerContent) - over - 64);
+    const body = answerContent.replace(/…$/, "");
+    answerContent = target > 3 ? `${truncateUtf8(body, target - 3)}…` : "";
+    cutNote = true;
   }
-  return card({ title, template, elements, streaming });
+  if (meta) {
+    meta.panelBytes = panelBytes;
+    meta.truncated = cutNote;
+  }
+  return fitCard(built);
 }
 
 /** Drop generated element ids and stale buttons before reusing card elements. */

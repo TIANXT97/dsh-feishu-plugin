@@ -655,3 +655,90 @@ test("runCard panel header carries fry-style context and token metrics", () => {
   assert.match(title, /🧮 4\.0k/);
   assert.equal(panel.header.icon_position, "right", "chevron sits on the right");
 });
+
+// ---- 卡片 29KB 字节预算：答案优先，面板让位（2026-11-12）------------------
+// 背景：maxAnswerChars 是字符上限，飞书卡片上限却是 30KB 字节。中文 12,000 字
+// 约 36KB，旧实现靠 fitCard「谁大砍谁」兜底，答案会在 ~9,273 字处被静默切断，
+// 而且折叠面板的字节是从答案嘴里抢的。
+
+const cardBytes = (card) => Buffer.byteLength(JSON.stringify(card), "utf8");
+const answerOf = (card) => card.body.elements.find((element) => element.element_id === "run_answer").content;
+const panelOf = (card) => card.body.elements.find((element) => element.tag === "collapsible_panel")?.elements?.[0]?.content;
+
+function longRunCard({ answerChars = 0, reasoningChars = 0, maxAnswerChars = 12_000, status = "running" }) {
+  const text = "字".repeat(answerChars);
+  const reasoning = "思".repeat(reasoningChars);
+  return runCard({
+    run: {
+      sessionId: "s1",
+      status,
+      startedAt: Date.now(),
+      canStop: status === "running",
+      step: reasoningChars ? 1 : 0,
+      model: "p/m",
+      tools: [],
+      toolTotal: reasoningChars ? 1 : 0,
+      streamingText: text,
+      text,
+      streamingReasoning: reasoning,
+      reasoningSteps: reasoningChars ? [{ step: 1, text: reasoning }] : [],
+    },
+    maxAnswerChars,
+    streaming: status === "running",
+  });
+}
+
+test("长中文回答优先留在卡里，折叠面板让出字节", () => {
+  const shortAnswer = longRunCard({ answerChars: 500, reasoningChars: 2_400 });
+  const longAnswer = longRunCard({ answerChars: 9_000, reasoningChars: 2_400 });
+
+  assert.equal(answerOf(shortAnswer), "字".repeat(500));
+  assert.equal(answerOf(longAnswer), "字".repeat(9_000), "答案不能被面板挤掉");
+  assert.ok(cardBytes(longAnswer) <= 29_000, `card is ${cardBytes(longAnswer)} bytes`);
+
+  const shortPanelBytes = Buffer.byteLength(panelOf(shortAnswer), "utf8");
+  const longPanelBytes = Buffer.byteLength(panelOf(longAnswer), "utf8");
+  assert.ok(longPanelBytes < shortPanelBytes, "答案变长时由面板让位");
+  assert.ok(longPanelBytes >= 64, "面板不被削到空");
+});
+
+test("字节截断是显式的：留省略号、有说明、卡片不超限", () => {
+  const card = longRunCard({ answerChars: 12_000, reasoningChars: 2_400 });
+  const answer = answerOf(card);
+  const json = JSON.stringify(card);
+  assert.ok(cardBytes(card) <= 29_000, `card is ${cardBytes(card)} bytes`);
+  assert.match(json, /卡片已截断/, "截断必须有说明");
+  assert.ok(answer.endsWith("…"), "被截断的答案要有省略号");
+  assert.ok(answer.length > 8_000, `中文应能留住 8,000+ 字，实测 ${answer.length}`);
+  assert.ok("字".repeat(12_000).startsWith(answer.slice(0, -1)), "留下的必须是原文前缀");
+});
+
+test("maxAnswerChars 仍是硬上限，且不越过字节预算", () => {
+  const capped = longRunCard({ answerChars: 12_000, maxAnswerChars: 1_000 });
+  assert.equal(answerOf(capped).length, 1_000);
+  assert.match(JSON.stringify(capped), /卡片已截断/);
+  assert.ok(cardBytes(capped) <= 29_000);
+});
+
+test("流式过程中答案只增不减（面板让位不会造成回缩）", () => {
+  let previous = -1;
+  for (let chars = 500; chars <= 10_000; chars += 500) {
+    const answer = answerOf(longRunCard({ answerChars: chars, reasoningChars: 1_200 }));
+    assert.ok(answer.length >= previous, `答案从 ${previous} 缩到 ${answer.length}`);
+    previous = answer.length;
+  }
+});
+
+test("英文长答案几乎不吃亏，中文截断点由字节决定", () => {
+  const english = runCard({
+    run: {
+      sessionId: "s1", status: "running", startedAt: Date.now(), canStop: true, step: 0,
+      model: "p/m", tools: [], toolTotal: 0, streamingText: "a".repeat(27_000), text: "a".repeat(27_000),
+    },
+    maxAnswerChars: 28_000,
+    streaming: true,
+  });
+  assert.equal(answerOf(english).length, 27_000);
+  assert.doesNotMatch(JSON.stringify(english), /卡片已截断/);
+  assert.ok(cardBytes(english) <= 29_000);
+});

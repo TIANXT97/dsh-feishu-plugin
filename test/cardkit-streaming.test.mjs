@@ -231,3 +231,80 @@ test("reconcileOrphans closes a card left running by the previous process", asyn
   assert.ok(calls.some((call) => call.startsWith("update:c1:❌ 回合已中断")), "terminal header written");
   assert.equal(cleared, false, "clearing happens on a normal finish, not here");
 });
+
+test("长答案让面板让位时，patch 走整卡写入（否则服务端会留下大面板并爆 30KB）", async () => {
+  const { RunCards } = await import("../src/dsh/runs.js");
+  const calls = [];
+  const written = [];
+  const cardkit = {
+    async createCard() {
+      return { ok: true, cardId: "card_1" };
+    },
+    async sendByReference() {
+      return { ok: true, messageId: "msg_1", cardId: "card_1" };
+    },
+    async updateElement(_cardId, _elementId, content) {
+      calls.push(`element:${content.length}`);
+      return { ok: true };
+    },
+    async updateCard(_cardId, card) {
+      calls.push("card");
+      written.push(card);
+      return { ok: true };
+    },
+    async closeStreaming() {
+      return { ok: true };
+    },
+  };
+  const runs = new RunCards({
+    bridge: {},
+    sender: {},
+    cardkit,
+    state: {},
+    config: { maxAnswerChars: 12_000, streamThrottleMs: 50, stream: true },
+    log: { warn() {}, debug() {}, info() {} },
+  });
+  const reasoning = "思".repeat(2_400);
+  const run = {
+    sessionId: "s1",
+    chatId: "chat",
+    tools: [],
+    toolTotal: 1,
+    step: 1,
+    reasoningSteps: [{ step: 1, text: reasoning }],
+    streamingReasoning: reasoning,
+    status: "starting",
+    startedAt: Date.now(),
+    streamingText: "",
+    streamingReasoning: reasoning,
+    text: "",
+  };
+  await runs.openCard(run, undefined, "chat");
+  run.status = "running";
+
+  run.streamingText = "短答案";
+  await runs.patch(run, true);
+  assert.equal(calls.at(-1), "card");
+
+  // 答案长到必须让面板缩水：这次不能只发元素，否则服务端卡片会保留大面板。
+  run.streamingText = "字".repeat(9_000);
+  await runs.patch(run);
+  assert.equal(calls.at(-1), "card", "面板尺寸变了要整卡重写");
+  const panel = written.at(-1).body.elements.find((element) => element.tag === "collapsible_panel");
+  assert.ok(panel, "面板还在");
+  const panelBody = panel.elements[0].content;
+  assert.ok(
+    Buffer.byteLength(panelBody, "utf8") < 2_400,
+    "面板应当让位（原始 2400 字）",
+  );
+  const answer = written.at(-1).body.elements.find((element) => element.element_id === "run_answer").content;
+  assert.equal(answer, "字".repeat(9_000), "答案完整保留");
+  assert.ok(Buffer.byteLength(JSON.stringify(written.at(-1)), "utf8") <= 29_000);
+
+  // 同样的内容再 patch 一次：既没换面板也没换答案，就不该再整卡重写。
+  const cardCount = calls.filter((call) => call === "card").length;
+  await runs.patch(run);
+  await new Promise((resolve) => setTimeout(resolve, 120));
+  assert.equal(calls.filter((call) => call === "card").length, cardCount, "无变化时退回元素流式");
+  runs.dispose();
+});
